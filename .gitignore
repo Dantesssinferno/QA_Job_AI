@@ -1,0 +1,7 @@
+.env
+.venv/
+.browser-profile/
+qa_jobs.sqlite3
+out/
+__pycache__/
+*.pyc

@@ -1,0 +1,1 @@
+"""QA Job Scout package."""

@@ -1,0 +1,12 @@
+[project]
+name = "qa-job-scout"
+version = "0.1.0"
+description = "Локальный агент для поиска подходящих удалённых QA-вакансий"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

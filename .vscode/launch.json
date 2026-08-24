@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "QA Job Scout: scan",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "qa_job_scout",
+      "args": ["scan"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
