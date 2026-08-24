@@ -1,16 +1,12 @@
-"""Site-specific vacancy adapters.
-
-Each adapter owns its listing-card selector, vacancy-link selection, and the
-selectors used on its detail page.  No adapter silently falls back to a broad
-``a[href]`` scan: an empty selector produces a logged source failure instead.
-"""
+"""Site-specific vacancy adapters with parallel detail-page collection."""
 from __future__ import annotations
 
+import asyncio
+import os
 from dataclasses import dataclass
 from typing import Iterable
-from urllib.parse import urljoin
 
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
 from .core import Vacancy
 
@@ -28,6 +24,7 @@ class AdapterSpec:
     date_selectors: tuple[str, ...] = ("time", "[class*='date']", "[class*='publish']")
     detail_wait_selector: str = "h1"
     requires_login: bool = False
+    detail_pages: bool = True
 
 
 @dataclass
@@ -47,12 +44,12 @@ class SourceRun:
 
 class BaseAdapter:
     spec: AdapterSpec
-    page_timeout_ms = 45_000
-    selector_timeout_ms = 15_000
-    max_vacancies = 75
+    page_timeout_ms = int(os.getenv("PAGE_TIMEOUT_MS", "20000"))
+    selector_timeout_ms = int(os.getenv("SELECTOR_TIMEOUT_MS", "7000"))
 
     def __init__(self) -> None:
         self.spec = self.get_spec()
+        self.max_vacancies = max(1, int(os.getenv("MAX_VACANCIES", "25")))
 
     def get_spec(self) -> AdapterSpec:
         raise NotImplementedError
@@ -70,9 +67,16 @@ class BaseAdapter:
         return ""
 
     async def list_cards(self, page: Page) -> list[dict[str, str]]:
-        await page.goto(self.spec.url, wait_until="domcontentloaded", timeout=self.page_timeout_ms)
+        await page.goto(
+            self.spec.url,
+            wait_until="domcontentloaded",
+            timeout=self.page_timeout_ms,
+        )
         cards = page.locator(self.spec.card_selector)
-        await cards.first.wait_for(state="attached", timeout=self.selector_timeout_ms)
+        await cards.first.wait_for(
+            state="attached",
+            timeout=self.selector_timeout_ms,
+        )
         return await cards.evaluate_all(
             """(cards, spec) => cards.slice(0, spec.limit).map(card => {
                 const link = card.matches(spec.link) ? card : card.querySelector(spec.link);
@@ -89,17 +93,41 @@ class BaseAdapter:
                   text: card.innerText.trim()
                 };
             }).filter(item => item.href && item.title)""",
-            {"link": self.spec.link_selector, "titles": list(self.spec.title_selectors), "limit": self.max_vacancies},
+            {
+                "link": self.spec.link_selector,
+                "titles": list(self.spec.title_selectors),
+                "limit": self.max_vacancies,
+            },
+        )
+
+    def card_to_vacancy(self, card: dict[str, str]) -> Vacancy:
+        text = " ".join(card["text"].split())
+        return Vacancy(
+            source=self.spec.name,
+            title=" ".join(card["title"].split()),
+            url=card["href"],
+            text=text,
+            published_text=text,
+            remote=any(
+                word in text.lower()
+                for word in ("remote", "удал", "home office", "global")
+            ),
         )
 
     async def read_detail(self, page: Page, card: dict[str, str]) -> Vacancy:
-        await page.goto(card["href"], wait_until="domcontentloaded", timeout=self.page_timeout_ms)
+        await page.goto(
+            card["href"],
+            wait_until="domcontentloaded",
+            timeout=self.page_timeout_ms,
+        )
         try:
-            await page.locator(self.spec.detail_wait_selector).first.wait_for(state="attached", timeout=self.selector_timeout_ms)
+            await page.locator(self.spec.detail_wait_selector).first.wait_for(
+                state="attached",
+                timeout=self.selector_timeout_ms,
+            )
         except PlaywrightTimeoutError:
-            # Some sites render an informative detail page without an H1.  The
-            # page body is still kept and the run gets a diagnostic in collect().
             pass
+
         title = await self._first_text(page, self.spec.detail_title_selectors) or card["title"]
         body = await self._first_text(page, self.spec.detail_body_selectors) or card["text"]
         date = await self._first_text(page, self.spec.date_selectors)
@@ -110,10 +138,32 @@ class BaseAdapter:
             url=card["href"],
             text=" ".join(all_text.split()),
             published_text=" ".join((date or all_text).split()),
-            remote=any(word in all_text.lower() for word in ("remote", "удал", "home office", "global")),
+            remote=any(
+                word in all_text.lower()
+                for word in ("remote", "удал", "home office", "global")
+            ),
         )
 
-    async def collect(self, page: Page) -> tuple[list[Vacancy], SourceRun]:
+    async def _read_detail_safe(
+        self,
+        context: BrowserContext,
+        card: dict[str, str],
+        detail_semaphore: asyncio.Semaphore,
+    ) -> Vacancy:
+        async with detail_semaphore:
+            page = await context.new_page()
+            try:
+                return await self.read_detail(page, card)
+            finally:
+                await page.close()
+
+    async def collect(
+        self,
+        page: Page,
+        *,
+        context: BrowserContext | None = None,
+        detail_semaphore: asyncio.Semaphore | None = None,
+    ) -> tuple[list[Vacancy], SourceRun]:
         run = SourceRun(self.spec.key, self.spec.name)
         try:
             cards = await self.list_cards(page)
@@ -122,14 +172,46 @@ class BaseAdapter:
             run.status = "failed"
             run.errors.append(f"Список: {type(exc).__name__}: {exc}")
             return [], run
-        vacancies: list[Vacancy] = []
-        for card in cards:
-            try:
-                vacancy = await self.read_detail(page, card)
-                run.detailed += 1
-                vacancies.append(vacancy)
-            except Exception as exc:
-                run.errors.append(f"{card['href']}: {type(exc).__name__}: {exc}")
+
+        if not cards:
+            run.status = "failed"
+            run.errors.append("Карточки вакансий не найдены.")
+            return [], run
+
+        # LinkedIn feed posts are already the final content. Opening the first
+        # external link from each post is both unnecessary and very slow.
+        if not self.spec.detail_pages:
+            vacancies = [self.card_to_vacancy(card) for card in cards]
+            run.detailed = 0
+            run.collected = len(vacancies)
+            return vacancies, run
+
+        if context is None or detail_semaphore is None:
+            vacancies: list[Vacancy] = []
+            for card in cards:
+                try:
+                    vacancy = await self.read_detail(page, card)
+                    run.detailed += 1
+                    vacancies.append(vacancy)
+                except Exception as exc:
+                    run.errors.append(f"{card['href']}: {type(exc).__name__}: {exc}")
+        else:
+            async def one(card: dict[str, str]):
+                try:
+                    return await self._read_detail_safe(context, card, detail_semaphore)
+                except Exception as exc:
+                    return card, exc
+
+            results = await asyncio.gather(*(one(card) for card in cards))
+            vacancies = []
+            for card, result in zip(cards, results):
+                if isinstance(result, tuple):
+                    _, exc = result
+                    run.errors.append(f"{card['href']}: {type(exc).__name__}: {exc}")
+                else:
+                    run.detailed += 1
+                    vacancies.append(result)
+
         run.collected = len(vacancies)
         if run.errors and not vacancies:
             run.status = "failed"
@@ -190,8 +272,20 @@ class RVCAdapter(BaseAdapter):
 
 class LinkedInAdapter(BaseAdapter):
     def get_spec(self) -> AdapterSpec:
-        return AdapterSpec("linkedin", "LinkedIn", "https://www.linkedin.com/feed/", 'p[data-testid="expandable-text-box"]', "a[href]", ("[data-testid='expandable-text-box']",), detail_body_selectors=("main", "body"), requires_login=True)
+        return AdapterSpec("linkedin", "LinkedIn", "https://www.linkedin.com/feed/", 'p[data-testid="expandable-text-box"]', "a[href]", ("[data-testid='expandable-text-box']",), detail_body_selectors=("main", "body"), requires_login=True, detail_pages=False)
 
 
 def enabled_adapters() -> tuple[BaseAdapter, ...]:
-    return (HireHiAdapter(), RocketHuntAdapter(), DreamJobAdapter(), HirifyAdapter(), TaylorAdapter(), JobRocketAdapter(), TalantoAdapter(), GetMatchAdapter(), GeekJobAdapter(), RVCAdapter(), LinkedInAdapter())
+    return (
+        HireHiAdapter(),
+        RocketHuntAdapter(),
+        DreamJobAdapter(),
+        HirifyAdapter(),
+        TaylorAdapter(),
+        JobRocketAdapter(),
+        TalantoAdapter(),
+        GetMatchAdapter(),
+        GeekJobAdapter(),
+        RVCAdapter(),
+        LinkedInAdapter(),
+    )

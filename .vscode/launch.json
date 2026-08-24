@@ -6,7 +6,9 @@
       "type": "debugpy",
       "request": "launch",
       "module": "qa_job_scout",
-      "args": ["scan"],
+      "args": [
+        "scan"
+      ],
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}"
     }
