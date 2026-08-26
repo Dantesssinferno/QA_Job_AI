@@ -37,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
 
+    env:
+      PYTHONPATH: .
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
