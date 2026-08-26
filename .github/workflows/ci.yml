@@ -10,157 +10,113 @@ on:
       - main
 
 jobs:
-  # ============================================================
-  # 1. LINT
-  # ============================================================
   lint:
     name: Lint
     runs-on: ubuntu-latest
 
     steps:
-      # Получаем код из GitHub
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      # Устанавливаем Python
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: "pip"
 
-      # Обновляем pip
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      # Устанавливаем зависимости
       - name: Install dependencies
         run: |
-          python -m pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
 
-      # Проверяем код через Ruff
       - name: Run Ruff
         run: ruff check .
 
-  # ============================================================
-  # 2. TEST
-  # ============================================================
   test:
     name: Test
     runs-on: ubuntu-latest
-
-    # Test запускается только если Lint прошёл
     needs: lint
 
     steps:
-      # Получаем код из GitHub
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      # Устанавливаем Python
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: "pip"
 
-      # Обновляем pip
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      # Устанавливаем зависимости
       - name: Install dependencies
         run: |
-          python -m pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
 
-      # Устанавливаем Chromium для Playwright
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
 
-      # Запускаем pytest и собираем coverage
       - name: Run tests
         run: |
-          python -m pytest \
+          pytest \
             -v \
             --junitxml=test-results.xml \
             --cov=qa_job_scout \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
 
-      # Сохраняем результаты pytest
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: test-results.xml
-          if-no-files-found: warn
 
-      # Сохраняем coverage.xml
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage.xml
-          if-no-files-found: warn
 
-      # Сохраняем pytest cache
-      - name: Upload pytest cache
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-cache
-          path: .pytest_cache
-          if-no-files-found: warn
-
-  # ============================================================
-  # 3. COVERAGE
-  # ============================================================
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
-
-    # Coverage запускается после Test
     needs: test
 
     steps:
-      # Получаем coverage.xml из предыдущего job
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Download coverage report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: coverage-report
-          path: coverage
+          path: coverage-data
 
-      # Проверяем coverage
       - name: Check coverage
         run: |
           python - <<'PY'
-          import sys
           import xml.etree.ElementTree as ET
 
-          coverage_file = "coverage/coverage.xml"
+          coverage_file = "coverage-data/coverage.xml"
 
           root = ET.parse(coverage_file).getroot()
 
           line_rate = float(root.attrib["line-rate"])
-          coverage_percent = line_rate * 100
+          coverage = line_rate * 100
 
-          print(f"Coverage: {coverage_percent:.2f}%")
+          print(f"Coverage: {coverage:.2f}%")
 
           minimum_coverage = 40.0
 
-          print(f"Minimum required coverage: {minimum_coverage:.2f}%")
-
-          if coverage_percent < minimum_coverage:
-              print(
-                  f"Coverage {coverage_percent:.2f}% is below "
-                  f"the required {minimum_coverage:.2f}%"
+          if coverage < minimum_coverage:
+              raise SystemExit(
+                  f"Coverage {coverage:.2f}% is below required "
+                  f"{minimum_coverage:.2f}%"
               )
-              sys.exit(1)
 
           print(
-              f"Coverage {coverage_percent:.2f}% "
-              f"meets the required threshold."
+              f"Coverage check passed: "
+              f"{coverage:.2f}% >= {minimum_coverage:.2f}%"
           )
           PY
