@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 
 from qa_job_scout.core import Vacancy, evaluate
 
-
 PROFILE = {"skills": ["REST API", "Postman"], "evidence": ["x", "y"], "headline": "QA", "location": "Молдова", "name": "Максим"}
 NOW = datetime(2026, 8, 24, tzinfo=UTC)
 

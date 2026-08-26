@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 # ============================================================
 # ROLE DETECTION
 # ============================================================
@@ -75,7 +74,7 @@ QA_TITLE_RE = re.compile(
         \bинженер\s+по\s+качеству\b
     )
     """,
-    re.I | re.X,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -169,7 +168,7 @@ NON_QA_TITLE_RE = re.compile(
         \bqa\s+automation\s+developer\b
     )
     """,
-    re.I | re.X,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -179,7 +178,7 @@ NON_QA_TITLE_RE = re.compile(
 
 REMOTE_RE = re.compile(
     r"\b(remote|удал[её]н|работа из дома|home office)\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -192,7 +191,7 @@ EN_REQUIRED_RE = re.compile(
         \b(?:b2|c1|c2)\b
     )
     """,
-    re.I | re.X,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -206,7 +205,7 @@ AUTOMATION_REQUIRED_RE = re.compile(
         (?:automation|автоматизац)
     )
     """,
-    re.I | re.X,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -233,31 +232,31 @@ AUTOMATION_ROLE_RE = re.compile(
         \bавтотест
     )
     """,
-    re.I | re.X,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
 DATE_PATTERNS = (
-    (re.compile(r"(сегодня|today)", re.I), 0),
-    (re.compile(r"(вчера|yesterday)", re.I), 1),
+    (re.compile(r"(сегодня|today)", re.IGNORECASE), 0),
+    (re.compile(r"(вчера|yesterday)", re.IGNORECASE), 1),
     (
         re.compile(
             r"(\d+)\s*(?:мин(?:ут[ыа]?|\.)?|minutes?)\s*(?:назад|ago)?",
-            re.I,
+            re.IGNORECASE,
         ),
         "minutes",
     ),
     (
         re.compile(
             r"(\d+)\s*(?:час(?:а|ов)?|hours?)\s*(?:назад|ago)?",
-            re.I,
+            re.IGNORECASE,
         ),
         "hours",
     ),
     (
         re.compile(
             r"(\d+)\s*(?:д(?:ень|ня|ней)|days?)\s*(?:назад|ago)",
-            re.I,
+            re.IGNORECASE,
         ),
         None,
     ),
@@ -345,7 +344,7 @@ def parse_age(
     month_match = re.search(
         r"\b(\d{1,2})\s+([а-яё]{3,}|[a-z]{3,})(?:\s+(\d{4}))?\b",
         clean,
-        re.I,
+        re.IGNORECASE,
     )
 
     if month_match:
@@ -665,7 +664,7 @@ def evaluate(
             \bрегрессион(?:ное|ого)\s+тестирован
         )
         """,
-        re.I | re.X,
+        re.IGNORECASE | re.VERBOSE,
     )
 
     # ------------------------------------------------------------
@@ -698,7 +697,7 @@ def evaluate(
             \bbackend\b
         )
         """,
-        re.I | re.X,
+        re.IGNORECASE | re.VERBOSE,
     )
 
     manual_match = bool(

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
-from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import BrowserContext, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .core import Vacancy
 
