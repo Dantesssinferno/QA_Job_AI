@@ -398,70 +398,74 @@ def evaluate(
     """
     Основной deterministic-фильтр вакансии.
 
-    Приоритеты:
+    Порядок принятия решения:
 
-    1. TITLE — определяет профессию.
-    2. TITLE — исключает явно нерелевантные профессии.
-    3. DESCRIPTION — уточняет требования.
-    4. DESCRIPTION — используется для skill matching.
-    5. Score считается только после прохождения
-       всех обязательных фильтров.
+    1. TITLE
+       Определяем профессию только по заголовку.
+
+    2. ROLE
+       Проверяем, является ли это подходящей QA-ролью.
+       Automation/SDET в title сразу отклоняется.
+
+    3. HARD FILTERS
+       Проверяем:
+       - обязательную automation;
+       - remote;
+       - обязательный английский.
+
+    4. DATE
+       Проверяем возраст вакансии.
+
+    5. SKILLS
+       Сопоставляем описание и title с профилем кандидата.
+
+    6. SCORE
+       Рассчитываем степень соответствия.
+
+    7. STATUS
+       recommended / needs_review / rejected
     """
+
+    now = now or datetime.now(UTC)
 
     title = " ".join(vacancy.title.split())
     description = " ".join(vacancy.text.split())
+
+    # Для поиска требований и навыков используем title + description.
+    # Но профессию определяем ТОЛЬКО по title.
     haystack = f"{title}\n{description}"
 
     reasons: list[str] = []
 
-    # --------------------------------------------------------
-    # DATE
-    # --------------------------------------------------------
+    # ============================================================
+    # 1. TITLE
+    # ============================================================
 
-    date = parse_age(
-        vacancy.published_text,
-        now,
-    )
-
-    vacancy.published_at = (
-        date.isoformat()
-        if date
-        else None
-    )
-
-    # --------------------------------------------------------
-    # 1. TITLE — ОСНОВНОЙ ФИЛЬТР ПРОФЕССИИ
-    # --------------------------------------------------------
-
-    # Сначала исключаем явно нерелевантные роли.
+    # Сначала исключаем явно нерелевантные профессии.
     #
     # Например:
-    # DevOps / MLOps Engineer
-    # Senior Product Engineer
+    # DevOps Engineer
+    # Backend Engineer
     # Data Analyst
     # System Analyst
-    # Penetration Testing Specialist
     #
-    # даже если description содержит:
-    # QA, testing, quality assurance и т.д.
+    # Даже если внутри description написано QA/testing,
+    # такая вакансия не должна стать QA-вакансией.
 
     if NON_QA_TITLE_RE.search(title):
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
             f"Название должности не относится к QA: {title}"
         ]
         return vacancy
 
-    # Затем ищем QA именно в TITLE.
-    #
-    # ВАЖНО:
-    # QA в description больше НЕ может сделать
-    # нерелевантную профессию QA-вакансией.
-
+    # Теперь QA должен быть непосредственно в TITLE.
     title_is_qa = bool(QA_TITLE_RE.search(title))
 
     if not title_is_qa:
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
             f"В заголовке вакансии нет QA-позиции: {title}"
         ]
@@ -471,38 +475,69 @@ def evaluate(
         f"QA-позиция подтверждена по заголовку: {title}."
     )
 
-    # --------------------------------------------------------
-    # 2. AUTOMATION
-    # --------------------------------------------------------
+    # ============================================================
+    # 2. ROLE
+    # ============================================================
 
-    # Automation/SDET в TITLE = сразу reject.
+    # Automation/SDET как отдельная роль
+    # для текущего профиля не подходит.
 
-    if AUTOMATION_ROLE_RE.search(title):
+    automation_role_match = (
+        AUTOMATION_ROLE_RE.search(title)
+        or AUTOMATION_ROLE_RE.search(description)
+    )
+
+    if automation_role_match:
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
-            "В заголовке указана automation/SDET роль, "
-            "а целевой профиль — manual/API/backend QA."
+            *reasons,
+            (
+                "В вакансии указана Automation/SDET роль, "
+                "что не соответствует целевому Manual/API/Backend QA профилю."
+            ),
         ]
         return vacancy
 
-    # Если automation обязательна в описании.
+    reasons.append(
+        "Роль соответствует Manual/API/Backend QA."
+    )
+
+    # ============================================================
+    # 3. HARD FILTERS
+    # ============================================================
+
+    # ------------------------------------------------------------
+    # 3.1 Automation required
+    # ------------------------------------------------------------
+
     if AUTOMATION_REQUIRED_RE.search(haystack):
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
+            *reasons,
             "Автоматизация указана как обязательное требование."
         ]
         return vacancy
 
-    # --------------------------------------------------------
-    # 3. REMOTE
-    # --------------------------------------------------------
+    reasons.append(
+        "Автоматизация не указана как обязательное требование."
+    )
 
-    if not (
+    # ------------------------------------------------------------
+    # 3.2 Remote
+    # ------------------------------------------------------------
+
+    remote_is_confirmed = (
         vacancy.remote
-        or REMOTE_RE.search(haystack)
-    ):
+        or bool(REMOTE_RE.search(haystack))
+    )
+
+    if not remote_is_confirmed:
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
+            *reasons,
             "Удалённый формат не подтверждён."
         ]
         return vacancy
@@ -511,33 +546,68 @@ def evaluate(
         "Удалённый формат подтверждён."
     )
 
-    # --------------------------------------------------------
-    # 4. ENGLISH
-    # --------------------------------------------------------
+    # ------------------------------------------------------------
+    # 3.3 English
+    # ------------------------------------------------------------
 
     if EN_REQUIRED_RE.search(haystack):
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
-            "Английский указан как обязательный."
+            *reasons,
+            "Английский указан как обязательное требование."
         ]
         return vacancy
 
-    # --------------------------------------------------------
-    # 5. DATE
-    # --------------------------------------------------------
+    reasons.append(
+        "Английский не указан как обязательное требование."
+    )
+
+    # ============================================================
+    # 4. DATE
+    # ============================================================
+
+    # В нормальном crawler-е дата должна находиться
+    # в published_text.
+    #
+    # Но unit-тесты и некоторые сайты могут передавать дату
+    # внутри текста вакансии.
+    #
+    # Поэтому используем fallback:
+    #
+    # published_text -> description -> title
+
+    date_source = (
+        vacancy.published_text
+        or description
+        or title
+    )
+
+    date = parse_age(
+        date_source,
+        now,
+    )
+
+    vacancy.published_at = (
+        date.isoformat()
+        if date
+        else None
+    )
 
     if date is None:
         vacancy.status = "needs_review"
+        vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Не удалось надёжно прочитать дату публикации."
+            "Не удалось надёжно определить дату публикации."
         ]
         return vacancy
 
-    if (
-        now or datetime.now(UTC)
-    ) - date > timedelta(days=5):
+    age = now - date
+
+    if age > timedelta(days=5):
         vacancy.status = "rejected"
+        vacancy.score = 0
         vacancy.reasons = [
             *reasons,
             "Вакансии больше пяти дней."
@@ -548,19 +618,11 @@ def evaluate(
         "Дата публикации не старше 5 дней."
     )
 
-    # --------------------------------------------------------
-    # 6. DESCRIPTION / SKILLS
-    # --------------------------------------------------------
-    #
-    # Здесь описание уже НЕ определяет профессию.
-    #
-    # Оно только помогает понять:
-    # - насколько вакансия подходит;
-    # - какие технологии совпадают;
-    # - manual/API/backend ли это.
-    #
+    # ============================================================
+    # 5. SKILLS
+    # ============================================================
 
-    normalized_description = description.lower()
+    normalized_haystack = haystack.lower()
 
     profile_skills = profile.get(
         "skills",
@@ -570,83 +632,113 @@ def evaluate(
     matches = [
         skill
         for skill in profile_skills
-        if skill.lower() in normalized_description
+        if skill.lower() in normalized_haystack
     ]
 
-    # --------------------------------------------------------
-    # 7. QA SPECIALIZATION MATCH
-    # --------------------------------------------------------
-
-    backend_api_re = re.compile(
-        r"""
-        \b(
-            api
-            |rest
-            |graphql
-            |backend
-            |back-end
-            |server-side
-            |микросервис
-            |микросервисы
-            |microservice
-            |microservices
-        )\b
-        """,
-        re.I | re.X,
-    )
+    # ------------------------------------------------------------
+    # Manual QA
+    # ------------------------------------------------------------
 
     manual_re = re.compile(
         r"""
-        \b(
-            manual
-            |manual\s+testing
-            |manual\s+qa
-            |ручн(?:ое|ого)\s+тестирован
-            |functional\s+testing
-            |регрессион
-            |regрессион
-        )\b
+        (?:
+            \bmanual\b
+            |
+            \bmanual\s+testing\b
+            |
+            \bmanual\s+qa\b
+            |
+            \bmanual\s+tester\b
+            |
+            \bfunctional\s+testing\b
+            |
+            \bregression\s+testing\b
+            |
+            \bsmoke\s+testing\b
+            |
+            \bтестировщик\b
+            |
+            \bручн(?:ое|ого|ым|ая)\s+тестирован
+            |
+            \bфункциональн(?:ое|ого)\s+тестирован
+            |
+            \bрегрессион(?:ное|ого)\s+тестирован
+        )
         """,
         re.I | re.X,
     )
 
-    backend_api_match = bool(
-        backend_api_re.search(normalized_description)
+    # ------------------------------------------------------------
+    # API / Backend
+    # ------------------------------------------------------------
+
+    backend_api_re = re.compile(
+        r"""
+        (?:
+            \bapi\b
+            |
+            \brest\b
+            |
+            \bgraphql\b
+            |
+            \bbackend\b
+            |
+            \bback-end\b
+            |
+            \bserver-side\b
+            |
+            \bmicroservice\b
+            |
+            \bmicroservices\b
+            |
+            \bмикросервис
+            |
+            \bбэкенд\b
+            |
+            \bbackend\b
+        )
+        """,
+        re.I | re.X,
     )
 
     manual_match = bool(
-        manual_re.search(normalized_description)
+        manual_re.search(normalized_haystack)
     )
 
-    # --------------------------------------------------------
-    # 8. SCORE
-    # --------------------------------------------------------
-    #
-    # Теперь score НЕ зависит просто от количества
-    # случайных технических навыков.
-    #
+    backend_api_match = bool(
+        backend_api_re.search(normalized_haystack)
+    )
+
+    # ============================================================
+    # 6. SCORE
+    # ============================================================
+
+    # QA-вакансия, прошедшая hard filters,
+    # уже является потенциально релевантной.
 
     score = 55
 
-    # Manual QA — сильное совпадение.
+    # Если manual явно указан.
     if manual_match:
         score += 15
+
         reasons.append(
-            "В описании подтверждено ручное тестирование."
+            "В вакансии подтверждено ручное тестирование."
         )
 
-    # API/backend — сильное совпадение с профилем.
+    # API/backend — один из основных профилей кандидата.
     if backend_api_match:
         score += 15
+
         reasons.append(
-            "В описании есть API/backend-направление."
+            "В вакансии есть API/backend-направление."
         )
 
-    # Совпадения навыков.
+    # Совпадение навыков.
     #
-    # Ограничиваем вклад навыков, чтобы 20 технологий
-    # не превращали любую инженерную вакансию
-    # в 95/95.
+    # Максимум +10, чтобы количество технологий
+    # не доминировало над ролью.
+
     if matches:
         skill_bonus = min(
             10,
@@ -660,9 +752,24 @@ def evaluate(
             + ", ".join(matches[:8])
             + "."
         )
+
     else:
         reasons.append(
             "Прямых совпадений навыков с профилем немного."
+        )
+
+    # ------------------------------------------------------------
+    # Дополнительный бонус за QA + API
+    #
+    # Это особенно важно для твоего профиля.
+    # ------------------------------------------------------------
+
+    if title_is_qa and backend_api_match:
+        score += 5
+
+        reasons.append(
+            "QA + API является сильным совпадением "
+            "с профилем кандидата."
         )
 
     vacancy.score = min(
@@ -670,16 +777,12 @@ def evaluate(
         score,
     )
 
-    # --------------------------------------------------------
-    # 9. FINAL STATUS
-    # --------------------------------------------------------
+    # ============================================================
+    # 7. FINAL STATUS
+    # ============================================================
 
     if vacancy.score >= 75:
         vacancy.status = "recommended"
-
-    elif vacancy.score >= 65:
-        vacancy.status = "needs_review"
-
     else:
         vacancy.status = "needs_review"
 
