@@ -1,7 +1,8 @@
-.env
 .venv/
-.browser-profile/
-qa_jobs.sqlite3
-out/
 __pycache__/
+.pytest_cache/
 *.pyc
+.env
+test-results.xml
+coverage.xml
+htmlcov/

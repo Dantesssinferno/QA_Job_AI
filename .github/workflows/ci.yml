@@ -11,33 +11,70 @@ on:
 
 jobs:
   test:
+    name: Lint, Test and Coverage
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Получаем код из GitHub
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Устанавливаем Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
 
+      # 3. Обновляем pip
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
+      # 4. Устанавливаем зависимости проекта
       - name: Install dependencies
         run: |
-          python -m pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt
 
+      # 5. Устанавливаем браузеры Playwright
       - name: Install Playwright browsers
-        run: |
-          python -m playwright install --with-deps chromium
+        run: python -m playwright install --with-deps chromium
 
+      # 6. Проверяем Python-код через Ruff
+      - name: Run Ruff
+        run: ruff check .
+
+      # 7. Запускаем pytest
+      #    JUnit XML нужен для отчёта GitHub Actions
+      #    coverage.xml нужен для coverage
       - name: Run tests
         run: |
-          python -m pytest -v
+          pytest \
+            -v \
+            --junitxml=test-results.xml \
+            --cov=qa_job_scout \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
 
-      - name: Check Python syntax
-        run: |
-          python -m compileall qa_job_scout tests
+      # 8. Загружаем результаты pytest
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+      # 9. Загружаем coverage
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # 10. Загружаем полный pytest cache
+      - name: Upload pytest cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-cache
+          path: .pytest_cache
