@@ -20,9 +20,12 @@ def enrich(vacancy: Vacancy, profile: dict) -> Vacancy:
 """
     try:
         client = OpenAI()
-        response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), input=prompt)
+        response = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            input=prompt,
+        )
         vacancy.cover_letter = response.output_text.strip()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"AI недоступен, использован шаблон: {type(exc).__name__}")
         vacancy.cover_letter = deterministic_letter(vacancy, profile)
     return vacancy

@@ -169,7 +169,7 @@ class BaseAdapter:
         try:
             cards = await self.list_cards(page)
             run.listed = len(cards)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             run.status = "failed"
             run.errors.append(f"Список: {type(exc).__name__}: {exc}")
             return [], run
@@ -194,13 +194,15 @@ class BaseAdapter:
                     vacancy = await self.read_detail(page, card)
                     run.detailed += 1
                     vacancies.append(vacancy)
-                except Exception as exc:
-                    run.errors.append(f"{card['href']}: {type(exc).__name__}: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    run.errors.append(
+                        f"{card['href']}: {type(exc).__name__}: {exc}"
+                    )
         else:
             async def one(card: dict[str, str]):
                 try:
                     return await self._read_detail_safe(context, card, detail_semaphore)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     return card, exc
 
             results = await asyncio.gather(*(one(card) for card in cards))
