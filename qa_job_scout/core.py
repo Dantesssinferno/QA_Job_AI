@@ -7,10 +7,11 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+
 # ============================================================
 # ROLE DETECTION
 # ============================================================
-#
+
 # Главное правило:
 # 1. Сначала определяем профессию по TITLE.
 # 2. Только если title явно QA — анализируем описание.
@@ -22,7 +23,7 @@ from pathlib import Path
 #   "System Analyst" + текст содержит "quality assurance"
 #
 # Такие вакансии не должны становиться QA-вакансиями.
-#
+
 
 QA_TITLE_RE = re.compile(
     r"""
@@ -78,15 +79,23 @@ QA_TITLE_RE = re.compile(
 )
 
 
-# Явные НЕ-QA роли.
+# ============================================================
+# HARD NEGATIVE ROLE KEYWORDS
+# ============================================================
+
+# Явно нерелевантные профессии.
 #
 # Они проверяются ДО QA_TITLE_RE.
 # Это важно для названий вроде:
+#   DevOps Engineer
+#   Backend Engineer
+#   Data Analyst
+#   System Analyst
+#   Fullstack Developer
 #
-# "Penetration Testing Specialist"
-# "QA Manager" в некоторых компаниях может быть QA,
-# поэтому manager сюда специально НЕ добавляем.
-#
+# Даже если внутри description написано QA/testing,
+# такая вакансия не должна становиться QA-вакансией.
+
 
 NON_QA_TITLE_RE = re.compile(
     r"""
@@ -173,8 +182,136 @@ NON_QA_TITLE_RE = re.compile(
 
 
 # ============================================================
+# NON-MANUAL QA ROLE DETECTION
+# ============================================================
+
+# ВАЖНО:
+#
+# Нельзя просто искать:
+#   automation
+#   автоматизация
+#   fullstack
+#
+# по всему description.
+#
+# Иначе нормальная Manual QA вакансия:
+#   "Automation is a plus"
+#   "You will work with the automation QA team"
+#
+# будет ошибочно отклонена.
+#
+# Поэтому здесь ищем именно признаки того, что automation/fullstack
+# является отдельной ролью или основным направлением вакансии.
+
+
+NON_MANUAL_ROLE_RE = re.compile(
+    r"""
+    (?:
+        # ----------------------------------------------------
+        # Fullstack / Full-stack / русские варианты
+        # ----------------------------------------------------
+
+        \bfull\s*[-/]?\s*stack\b
+        |
+        \bfullstack\b
+        |
+        \bфул[\s-]?ст(?:э|е)к\b
+        |
+        \bфул[\s-]?стак\b
+        |
+        \bфул[\s-]?л[\s-]?ст(?:э|е)к\b
+
+        |
+
+        # ----------------------------------------------------
+        # AQA
+        # ----------------------------------------------------
+
+        \baqa\b
+
+        |
+
+        # ----------------------------------------------------
+        # Automation QA / QA Automation
+        # ----------------------------------------------------
+
+        \bautomation\s+qa\b
+        |
+        \bqa\s+automation\b
+        |
+        \bautomation\s+tester\b
+        |
+        \bautomation\s+engineer\b
+        |
+        \btest\s+automation\s+engineer\b
+        |
+        \btest\s+automation\s+tester\b
+        |
+        \bautomation\s+test(?:ing|er)?\b
+        |
+        \bqa\s+automation\s+engineer\b
+
+        |
+
+        # ----------------------------------------------------
+        # SDET
+        # ----------------------------------------------------
+
+        \bsdet\b
+        |
+        \bsoftware\s+development\s+engineer\s+in\s+test\b
+
+        |
+
+        # ----------------------------------------------------
+        # Русские варианты automation-role
+        # ----------------------------------------------------
+
+        \bавтоматизатор(?:\s+тест(?:ирования|ирования))?\b
+        |
+        \bавтотест(?:ы|ов|ами|ирование|ированию|ировании)?\b
+        |
+        \bавтоматизац(?:ия|ии|ию|ией|ией)\s+тестирован
+        |
+        \bавтоматизац(?:ия|ии|ию|ией)\s+тест(?:ов|ы)?\b
+        |
+        \bинженер\s+по\s+автоматизации\s+тестирования\b
+        |
+        \bспециалист\s+по\s+автоматизации\s+тестирования\b
+
+        |
+
+        # ----------------------------------------------------
+        # Automation как должность
+        # ----------------------------------------------------
+        #
+        # Здесь допускаем просто "Automation", только если
+        # рядом находится тип должности.
+        #
+        # Например:
+        #   Automation QA
+        #   Automation Engineer
+        #
+        # уже поймаются выше.
+        #
+        # Просто "automation is a plus" НЕ поймается.
+        # ----------------------------------------------------
+
+        \bautomation\s+(?:specialist|developer|professional)\b
+        |
+        \bспециалист\s+по\s+автоматизац
+        |
+        \bинженер\s+по\s+автоматизац
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+# ============================================================
 # OTHER FILTERS
 # ============================================================
+
 
 REMOTE_RE = re.compile(
     r"\b(remote|удал[её]н|работа из дома|home office)\b",
@@ -195,6 +332,24 @@ EN_REQUIRED_RE = re.compile(
 )
 
 
+# ============================================================
+# AUTOMATION REQUIRED
+# ============================================================
+
+# Здесь automation действительно считается hard filter,
+# только если она указана как ОБЯЗАТЕЛЬНАЯ.
+#
+# Примеры, которые будут отклонены:
+#   Automation experience required
+#   Must have automation experience
+#   Автоматизация обязательна
+#
+# Примеры, которые НЕ будут отклонены:
+#   Automation is a plus
+#   Automation experience would be nice
+#   Work with automation team
+
+
 AUTOMATION_REQUIRED_RE = re.compile(
     r"""
     (?:
@@ -203,33 +358,6 @@ AUTOMATION_REQUIRED_RE = re.compile(
         |
         (?:required|обязател|must|необходим).{0,45}
         (?:automation|автоматизац)
-    )
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
-# Automation/SDET как самостоятельная профессия.
-AUTOMATION_ROLE_RE = re.compile(
-    r"""
-    (?:
-        \bqa\s+automation\b
-        |
-        \bautomation\s+qa\b
-        |
-        \bautomation\s+engineer\b
-        |
-        \btest\s+automation\s+engineer\b
-        |
-        \bautomation\s+tester\b
-        |
-        \bsdet\b
-        |
-        \bавтоматизац(?:ия|ии|ию)\s+тестирован
-        |
-        \bинженер\s+по\s+автоматизации\s+тестирования
-        |
-        \bавтотест
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -404,7 +532,8 @@ def evaluate(
 
     2. ROLE
        Проверяем, является ли это подходящей QA-ролью.
-       Automation/SDET в title сразу отклоняется.
+       Fullstack / AQA / Automation / SDET отклоняются,
+       если они обозначают отдельную роль.
 
     3. HARD FILTERS
        Проверяем:
@@ -447,6 +576,7 @@ def evaluate(
     # Backend Engineer
     # Data Analyst
     # System Analyst
+    # Fullstack Developer
     #
     # Даже если внутри description написано QA/testing,
     # такая вакансия не должна стать QA-вакансией.
@@ -478,29 +608,32 @@ def evaluate(
     # 2. ROLE
     # ============================================================
 
-    # Automation/SDET как отдельная роль
-    # для текущего профиля не подходит.
+    # ------------------------------------------------------------
+    # 2.1 Fullstack / AQA / Automation / SDET
+    # ------------------------------------------------------------
 
-    automation_role_match = (
-        AUTOMATION_ROLE_RE.search(title)
-        or AUTOMATION_ROLE_RE.search(description)
-    )
+    # Здесь проверяем только явные признаки отдельной
+    # нерелевантной роли.
+    #
+    # Поэтому:
+    #   "Automation is a plus"
+    #   "automation team"
+    #
+    # не будут автоматически отклонены.
 
-    if automation_role_match:
+    non_manual_role_match = NON_MANUAL_ROLE_RE.search(haystack)
+
+    if non_manual_role_match:
         vacancy.status = "rejected"
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
             (
-                "В вакансии указана Automation/SDET роль, "
-                "что не соответствует целевому Manual/API/Backend QA профилю."
+                "В вакансии обнаружена нерелевантная "
+                f"роль/направление: {non_manual_role_match.group(0)}."
             ),
         ]
         return vacancy
-
-    reasons.append(
-        "Роль соответствует Manual/API/Backend QA."
-    )
 
     # ============================================================
     # 3. HARD FILTERS
@@ -515,7 +648,7 @@ def evaluate(
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Автоматизация указана как обязательное требование."
+            "Автоматизация указана как обязательное требование.",
         ]
         return vacancy
 
@@ -537,7 +670,7 @@ def evaluate(
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Удалённый формат не подтверждён."
+            "Удалённый формат не подтверждён.",
         ]
         return vacancy
 
@@ -554,7 +687,7 @@ def evaluate(
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Английский указан как обязательное требование."
+            "Английский указан как обязательное требование.",
         ]
         return vacancy
 
@@ -598,7 +731,7 @@ def evaluate(
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Не удалось надёжно определить дату публикации."
+            "Не удалось надёжно определить дату публикации.",
         ]
         return vacancy
 
@@ -609,7 +742,7 @@ def evaluate(
         vacancy.score = 0
         vacancy.reasons = [
             *reasons,
-            "Вакансии больше пяти дней."
+            "Вакансии больше пяти дней.",
         ]
         return vacancy
 
@@ -693,8 +826,6 @@ def evaluate(
             \bмикросервис
             |
             \bбэкенд\b
-            |
-            \bbackend\b
         )
         """,
         re.IGNORECASE | re.VERBOSE,

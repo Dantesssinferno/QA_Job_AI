@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+qa_job_scout/__init__.py
+qa_job_scout/__main__.py
+qa_job_scout/adapters.py
+qa_job_scout/ai.py
+qa_job_scout/cli.py
+qa_job_scout/core.py
+qa_job_scout/crawler.py
+qa_job_scout/storage.py
+qa_job_scout.egg-info/PKG-INFO
+qa_job_scout.egg-info/SOURCES.txt
+qa_job_scout.egg-info/dependency_links.txt
+qa_job_scout.egg-info/top_level.txt
+tests/test_adapters.py
+tests/test_core.py
