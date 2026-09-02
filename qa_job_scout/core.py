@@ -187,21 +187,23 @@ NON_QA_TITLE_RE = re.compile(
 
 # ВАЖНО:
 #
-# Нельзя просто искать:
+# Здесь НЕ ищем просто:
 #   automation
 #   автоматизация
-#   fullstack
+#   автотесты
 #
-# по всему description.
+# Потому что Manual QA вакансия может содержать:
 #
-# Иначе нормальная Manual QA вакансия:
 #   "Automation is a plus"
-#   "You will work with the automation QA team"
+#   "Automation may be introduced later"
+#   "Automation can become a supporting tool"
+#   "You will work with the Automation QA team"
+#   "автоматизация может появиться позже"
 #
-# будет ошибочно отклонена.
+# Это не означает, что сама вакансия является Automation QA.
 #
-# Поэтому здесь ищем именно признаки того, что automation/fullstack
-# является отдельной ролью или основным направлением вакансии.
+# Поэтому найденное совпадение дополнительно проверяется
+# по контексту.
 
 
 NON_MANUAL_ROLE_RE = re.compile(
@@ -282,19 +284,7 @@ NON_MANUAL_ROLE_RE = re.compile(
         |
 
         # ----------------------------------------------------
-        # Automation как должность
-        # ----------------------------------------------------
-        #
-        # Здесь допускаем просто "Automation", только если
-        # рядом находится тип должности.
-        #
-        # Например:
-        #   Automation QA
-        #   Automation Engineer
-        #
-        # уже поймаются выше.
-        #
-        # Просто "automation is a plus" НЕ поймается.
+        # Automation как отдельная роль
         # ----------------------------------------------------
 
         \bautomation\s+(?:specialist|developer|professional)\b
@@ -302,6 +292,297 @@ NON_MANUAL_ROLE_RE = re.compile(
         \bспециалист\s+по\s+автоматизац
         |
         \bинженер\s+по\s+автоматизац
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+# ============================================================
+# BENIGN AUTOMATION CONTEXT
+# ============================================================
+
+# Контексты, в которых наличие automation НЕ означает,
+# что текущая вакансия является Automation QA.
+#
+# Например:
+#
+#   "Автоматизация может появиться позже"
+#   "Автоматизация как вспомогательный инструмент"
+#   "Automation is a plus"
+#   "Work with the Automation QA team"
+#   "Automation experience would be nice to have"
+#
+# Мы намеренно делаем список достаточно конкретным,
+# чтобы не превратить весь фильтр в "пропускай любую automation".
+
+
+BENIGN_AUTOMATION_CONTEXT_RE = re.compile(
+    r"""
+    (?:
+        # ----------------------------------------------------
+        # Автоматизация позже / в будущем
+        # ----------------------------------------------------
+
+        (?:автоматизац|автотест)
+        .{0,80}
+        (?:
+            позже
+            |
+            позднее
+            |
+            потом
+            |
+            в\s+будущем
+            |
+            со\s+временем
+            |
+            планируется
+            |
+            появится
+            |
+            может\s+появиться
+            |
+            возможно\s+появится
+        )
+        |
+        (?:
+            позже
+            |
+            позднее
+            |
+            потом
+            |
+            в\s+будущем
+            |
+            со\s+временем
+            |
+            планируется
+            |
+            появится
+            |
+            может\s+появиться
+            |
+            возможно\s+появится
+        )
+        .{0,80}
+        (?:автоматизац|автотест)
+
+        |
+
+        # ----------------------------------------------------
+        # Вспомогательный инструмент / дополнительная практика
+        # ----------------------------------------------------
+
+        (?:автоматизац|автотест)
+        .{0,80}
+        (?:
+            вспомогательн
+            |
+            дополнительн
+            |
+            второстепенн
+            |
+            как\s+инструмент
+            |
+            как\s+вспомогательный\s+инструмент
+        )
+        |
+        (?:
+            вспомогательн
+            |
+            дополнительн
+            |
+            второстепенн
+            |
+            как\s+инструмент
+            |
+            как\s+вспомогательный\s+инструмент
+        )
+        .{0,80}
+        (?:автоматизац|автотест)
+
+        |
+
+        # ----------------------------------------------------
+        # "Плюс", "преимущество", nice to have
+        # ----------------------------------------------------
+
+        (?:automation|автоматизац|автотест)
+        .{0,60}
+        (?:
+            plus
+            |
+            nice\s+to\s+have
+            |
+            would\s+be\s+a\s+plus
+            |
+            преимуществен
+            |
+            будет\s+плюсом
+            |
+            является\s+плюсом
+            |
+            желательно
+            |
+            приветствуется
+            |
+            желательно\s+знать
+        )
+        |
+        (?:
+            plus
+            |
+            nice\s+to\s+have
+            |
+            would\s+be\s+a\s+plus
+            |
+            преимуществен
+            |
+            будет\s+плюсом
+            |
+            является\s+плюсом
+            |
+            желательно
+            |
+            приветствуется
+            |
+            желательно\s+знать
+        )
+        .{0,60}
+        (?:automation|автоматизац|автотест)
+
+        |
+
+        # ----------------------------------------------------
+        # Работа с командой автоматизации
+        # ----------------------------------------------------
+
+        (?:
+            work|работ
+        )
+        .{0,80}
+        (?:
+            automation\s+qa
+            |
+            qa\s+automation
+            |
+            команд(?:ой|а).{0,20}(?:automation|автоматизац)
+            |
+            команд(?:ой|а).{0,20}автотест
+        )
+
+        |
+
+        (?:
+            automation\s+qa
+            |
+            qa\s+automation
+            |
+            команд(?:ой|а).{0,20}(?:automation|автоматизац)
+            |
+            команд(?:ой|а).{0,20}автотест
+        )
+        .{0,80}
+        (?:
+            work|работ
+        )
+
+        |
+
+        # ----------------------------------------------------
+        # Automation выполняется другой командой
+        # ----------------------------------------------------
+
+        (?:
+            automation\s+qa
+            |
+            qa\s+automation
+            |
+            автоматизац
+            |
+            автотест
+        )
+        .{0,100}
+        (?:
+            другой\s+команд
+            |
+            отдельн(?:ой|ая)\s+команд
+            |
+            команда\s+автоматизац
+            |
+            другой\s+отдел
+        )
+        |
+        (?:
+            другой\s+команд
+            |
+            отдельн(?:ой|ая)\s+команд
+            |
+            команда\s+автоматизац
+            |
+            другой\s+отдел
+        )
+        .{0,100}
+        (?:
+            automation\s+qa
+            |
+            qa\s+automation
+            |
+            автоматизац
+            |
+            автотест
+        )
+
+        |
+
+        # ----------------------------------------------------
+        # Automation не является основной задачей
+        # ----------------------------------------------------
+
+        (?:
+            не\s+является\s+основн
+            |
+            не\s+основн
+            |
+            не\s+будет\s+основн
+            |
+            не\s+входит\s+в\s+основн
+            |
+            не\s+является\s+ключев
+            |
+            второстепенн
+        )
+        .{0,80}
+        (?:
+            automation
+            |
+            автоматизац
+            |
+            автотест
+        )
+        |
+        (?:
+            automation
+            |
+            автоматизац
+            |
+            автотест
+        )
+        .{0,80}
+        (?:
+            не\s+является\s+основн
+            |
+            не\s+основн
+            |
+            не\s+будет\s+основн
+            |
+            не\s+входит\s+в\s+основн
+            |
+            не\s+является\s+ключев
+            |
+            второстепенн
+        )
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -364,6 +645,11 @@ AUTOMATION_REQUIRED_RE = re.compile(
 )
 
 
+# ============================================================
+# DATE PARSING
+# ============================================================
+
+
 DATE_PATTERNS = (
     (re.compile(r"(сегодня|today)", re.IGNORECASE), 0),
     (re.compile(r"(вчера|yesterday)", re.IGNORECASE), 1),
@@ -420,6 +706,11 @@ MONTHS = {
 }
 
 
+# ============================================================
+# DATA MODEL
+# ============================================================
+
+
 @dataclass
 class Vacancy:
     source: str
@@ -436,7 +727,14 @@ class Vacancy:
 
     @property
     def id(self) -> str:
-        return hashlib.sha256(self.url.encode()).hexdigest()[:12]
+        return hashlib.sha256(
+            self.url.encode()
+        ).hexdigest()[:12]
+
+
+# ============================================================
+# DATE PARSER
+# ============================================================
 
 
 def parse_age(
@@ -517,6 +815,87 @@ def parse_age(
     return None
 
 
+# ============================================================
+# CONTEXT-AWARE ROLE CHECK
+# ============================================================
+
+
+def _is_benign_role_match(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    """
+    Определяет, является ли найденное automation/fullstack/AQA
+    упоминание контекстом, а не основной ролью вакансии.
+
+    Пример benign:
+
+        "Автоматизация может появиться позже как вспомогательный инструмент."
+
+    Пример NOT benign:
+
+        "Ищем Senior Automation QA Engineer."
+    """
+    start = max(0, match.start() - 120)
+    end = min(len(text), match.end() + 120)
+
+    context = text[start:end]
+
+    return bool(
+        BENIGN_AUTOMATION_CONTEXT_RE.search(
+            context
+        )
+    )
+
+
+def _find_non_manual_role_match(
+    title: str,
+    description: str,
+) -> re.Match[str] | None:
+    """
+    Ищет признаки Automation/AQA/SDET/Fullstack.
+
+    В TITLE совпадение считается жёстким:
+        Automation QA
+        AQA Engineer
+        SDET
+        Fullstack QA
+
+    В DESCRIPTION совпадение проверяется по контексту.
+    Это позволяет не отклонять Manual QA вакансии, где
+    automation упоминается как будущее направление,
+    дополнительный навык или взаимодействие с другой командой.
+    """
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    title_match = NON_MANUAL_ROLE_RE.search(title)
+
+    if title_match:
+        return title_match
+
+    # --------------------------------------------------------
+    # DESCRIPTION
+    # --------------------------------------------------------
+
+    for match in NON_MANUAL_ROLE_RE.finditer(
+        description
+    ):
+        if not _is_benign_role_match(
+            description,
+            match,
+        ):
+            return match
+
+    return None
+
+
+# ============================================================
+# EVALUATION
+# ============================================================
+
+
 def evaluate(
     vacancy: Vacancy,
     profile: dict,
@@ -556,12 +935,19 @@ def evaluate(
 
     now = now or datetime.now(UTC)
 
-    title = " ".join(vacancy.title.split())
-    description = " ".join(vacancy.text.split())
+    title = " ".join(
+        vacancy.title.split()
+    )
+
+    description = " ".join(
+        vacancy.text.split()
+    )
 
     # Для поиска требований и навыков используем title + description.
     # Но профессию определяем ТОЛЬКО по title.
-    haystack = f"{title}\n{description}"
+    haystack = (
+        f"{title}\n{description}"
+    )
 
     reasons: list[str] = []
 
@@ -590,7 +976,9 @@ def evaluate(
         return vacancy
 
     # Теперь QA должен быть непосредственно в TITLE.
-    title_is_qa = bool(QA_TITLE_RE.search(title))
+    title_is_qa = bool(
+        QA_TITLE_RE.search(title)
+    )
 
     if not title_is_qa:
         vacancy.status = "rejected"
@@ -612,16 +1000,33 @@ def evaluate(
     # 2.1 Fullstack / AQA / Automation / SDET
     # ------------------------------------------------------------
 
-    # Здесь проверяем только явные признаки отдельной
-    # нерелевантной роли.
+    # В TITLE такие роли считаются жёстким отрицанием.
+    #
+    # В DESCRIPTION дополнительно учитываем контекст.
     #
     # Поэтому:
-    #   "Automation is a plus"
-    #   "automation team"
     #
-    # не будут автоматически отклонены.
+    #   "Automation QA" в title
+    #       -> rejected
+    #
+    #   "Automation QA team" в description
+    #       -> может быть пропущено
+    #
+    #   "Automation may appear later"
+    #       -> пропускается
+    #
+    #   "Automation is a plus"
+    #       -> пропускается
+    #
+    #   "Main responsibility is writing automated tests"
+    #       -> rejected
 
-    non_manual_role_match = NON_MANUAL_ROLE_RE.search(haystack)
+    non_manual_role_match = (
+        _find_non_manual_role_match(
+            title=title,
+            description=description,
+        )
+    )
 
     if non_manual_role_match:
         vacancy.status = "rejected"
@@ -630,7 +1035,8 @@ def evaluate(
             *reasons,
             (
                 "В вакансии обнаружена нерелевантная "
-                f"роль/направление: {non_manual_role_match.group(0)}."
+                f"роль/направление: "
+                f"{non_manual_role_match.group(0)}."
             ),
         ]
         return vacancy
@@ -662,7 +1068,11 @@ def evaluate(
 
     remote_is_confirmed = (
         vacancy.remote
-        or bool(REMOTE_RE.search(haystack))
+        or bool(
+            REMOTE_RE.search(
+                haystack
+            )
+        )
     )
 
     if not remote_is_confirmed:
@@ -832,11 +1242,15 @@ def evaluate(
     )
 
     manual_match = bool(
-        manual_re.search(normalized_haystack)
+        manual_re.search(
+            normalized_haystack
+        )
     )
 
     backend_api_match = bool(
-        backend_api_re.search(normalized_haystack)
+        backend_api_re.search(
+            normalized_haystack
+        )
     )
 
     # ============================================================
@@ -921,6 +1335,11 @@ def evaluate(
     return vacancy
 
 
+# ============================================================
+# DETERMINISTIC COVER LETTER
+# ============================================================
+
+
 def deterministic_letter(
     vacancy: Vacancy,
     profile: dict,
@@ -941,6 +1360,11 @@ def deterministic_letter(
     )
 
 
+# ============================================================
+# PROFILE
+# ============================================================
+
+
 def load_profile(
     path: str = "candidate_profile.json",
 ) -> dict:
@@ -949,6 +1373,11 @@ def load_profile(
             encoding="utf-8"
         )
     )
+
+
+# ============================================================
+# JSON
+# ============================================================
 
 
 def vacancy_json(

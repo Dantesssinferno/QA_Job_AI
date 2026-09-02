@@ -26,6 +26,8 @@ class AdapterSpec:
         "article",
         "body",
     )
+    detail_exclude_selectors: tuple[str, ...] = ()
+    detail_cut_markers: tuple[str, ...] = ()
     date_selectors: tuple[str, ...] = (
         "time",
         "[class*='date']",
@@ -89,11 +91,6 @@ class BaseAdapter:
         page: Page,
         selectors: Iterable[str],
     ) -> str:
-        """
-        Возвращает текст первого найденного видимого элемента
-        из переданных selectors.
-        """
-
         for selector in selectors:
             locator = page.locator(
                 selector
@@ -107,6 +104,98 @@ class BaseAdapter:
 
                     if text:
                         return text
+
+            except PlaywrightTimeoutError:
+                continue
+
+        return ""
+
+    def _cut_unrelated_sections(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Обрезает текст после начала нерелевантных секций.
+
+        Например:
+
+            Основной текст вакансии
+
+            Похожие вакансии
+            Senior Automation QA Engineer
+            AQA Engineer
+
+        превращается в:
+
+            Основной текст вакансии
+        """
+        if not text:
+            return ""
+
+        result = text
+
+        for marker in self.spec.detail_cut_markers:
+            index = result.lower().find(
+                marker.lower()
+            )
+
+            if index >= 0:
+                result = result[:index].strip()
+
+        return result
+
+    async def _extract_detail_body(
+        self,
+        page: Page,
+    ) -> str:
+        """
+        Извлекает основной текст текущей вакансии.
+
+        Сначала удаляются явно нерелевантные DOM-блоки,
+        затем текст обрезается по маркерам вроде
+        "Похожие вакансии".
+        """
+        for selector in self.spec.detail_body_selectors:
+            locator = page.locator(
+                selector
+            ).first
+
+            try:
+                if not await locator.count():
+                    continue
+
+                if not await locator.is_visible():
+                    continue
+
+                # Удаляем явно нерелевантные элементы из DOM.
+                #
+                # ВАЖНО:
+                # Здесь должны использоваться только обычные CSS-селекторы.
+                # Playwright-специфические :has-text() сюда помещать нельзя,
+                # потому что внутри evaluate() используется querySelectorAll().
+                if self.spec.detail_exclude_selectors:
+                    await locator.evaluate(
+                        """
+                        (root, selectors) => {
+                            for (const selector of selectors) {
+                                root.querySelectorAll(selector)
+                                    .forEach(node => node.remove());
+                            }
+                        }
+                        """,
+                        list(
+                            self.spec.detail_exclude_selectors
+                        ),
+                    )
+
+                text = (
+                    await locator.inner_text()
+                ).strip()
+
+                if text:
+                    return self._cut_unrelated_sections(
+                        text
+                    )
 
             except PlaywrightTimeoutError:
                 continue
@@ -202,11 +291,7 @@ class BaseAdapter:
             ),
             url=card["href"],
             text=text,
-
-            # Для источников без detail page
-            # карточка является основным источником.
             published_text=text,
-
             remote=any(
                 word in text.lower()
                 for word in (
@@ -248,15 +333,13 @@ class BaseAdapter:
             or card["title"]
         )
 
-        body = (
-            await self._first_text(
-                page,
-                self.spec.detail_body_selectors,
-            )
-            or card["text"]
+        body = await self._extract_detail_body(
+            page
         )
 
-        # Ищем только настоящий элемент даты.
+        if not body:
+            body = card["text"]
+
         date = await self._first_text(
             page,
             self.spec.date_selectors,
@@ -266,15 +349,10 @@ class BaseAdapter:
             f"{card['text']}\n{body}"
         )
 
-        # КРИТИЧЕСКИ ВАЖНО:
+        # Если date selector не найден,
+        # не используем весь detail body как источник даты.
         #
-        # Если настоящий date selector не сработал,
-        # НЕ передаём весь all_text в parse_age().
-        #
-        # Иначе любое число/дата из описания может
-        # быть ошибочно воспринято как дата публикации.
-        #
-        # В fallback используем только текст карточки.
+        # Фолбэк только на текст карточки.
         published_text = (
             date
             or card["text"]
@@ -327,10 +405,7 @@ class BaseAdapter:
         *,
         context: BrowserContext | None = None,
         detail_semaphore: asyncio.Semaphore | None = None,
-    ) -> tuple[
-        list[Vacancy],
-        SourceRun,
-    ]:
+    ) -> tuple[list[Vacancy], SourceRun]:
         run = SourceRun(
             self.spec.key,
             self.spec.name,
@@ -362,8 +437,6 @@ class BaseAdapter:
 
             return [], run
 
-        # LinkedIn feed posts already represent
-        # the final collected content.
         if not self.spec.detail_pages:
             vacancies = [
                 self.card_to_vacancy(card)
@@ -389,7 +462,6 @@ class BaseAdapter:
                     )
 
                     run.detailed += 1
-
                     vacancies.append(
                         vacancy
                     )
@@ -438,10 +510,7 @@ class BaseAdapter:
 
                 else:
                     run.detailed += 1
-
-                    vacancies.append(
-                        result
-                    )
+                    vacancies.append(result)
 
         run.collected = len(
             vacancies
@@ -467,39 +536,24 @@ class HireHiAdapter(BaseAdapter):
         return AdapterSpec(
             key="hirehi",
             name="HireHi",
-
             url=(
                 "https://hirehi.ru/vacancies/"
                 "manual-qa?"
                 "format=%D1%83%D0%B4%D0%B0%D0%BB%D1%91%D0%BD%D0%BD%D0%BE"
                 "&search=QA"
             ),
-
-            card_selector=(
-                "a.job-card[data-id]"
-            ),
-
-            link_selector=(
-                "a.job-card[data-id]"
-            ),
-
+            card_selector="a.job-card[data-id]",
+            link_selector="a.job-card[data-id]",
             title_selectors=(
                 "[class*='title']",
                 "h2",
                 "h3",
             ),
-
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
                 "body",
             ),
-
-            # Точный локатор HireHi:
-            #
-            # <span class="vacancy-published-date">
-            #     31 авг
-            # </span>
             date_selectors=(
                 ".vacancy-published-date",
                 "[class*='vacancy-published-date']",
@@ -521,24 +575,14 @@ class RocketHuntAdapter(BaseAdapter):
         return AdapterSpec(
             key="rockethunt",
             name="RocketHunt",
-            url=(
-                "https://rockethunt.ai/ru?text=QA"
-            ),
-
-            card_selector=(
-                "article.cv-card"
-            ),
-
-            link_selector=(
-                "a[href]"
-            ),
-
+            url="https://rockethunt.ai/ru?text=QA",
+            card_selector="article.cv-card",
+            link_selector="a[href]",
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
@@ -565,21 +609,13 @@ class DreamJobAdapter(BaseAdapter):
                 "&jbfrp%5BonlyWithSalary%5D=0"
                 "&jbfrp%5BorderBy%5D=relevance"
             ),
-
-            card_selector=(
-                "div.vacancy-new.vacancy-new__item"
-            ),
-
-            link_selector=(
-                "a[href*='/vacancy']"
-            ),
-
+            card_selector="div.vacancy-new.vacancy-new__item",
+            link_selector="a[href*='/vacancy']",
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
@@ -599,7 +635,6 @@ class HirifyAdapter(BaseAdapter):
         return AdapterSpec(
             key="hirify",
             name="Hirify",
-
             url=(
                 "https://hirify.me/?"
                 "countries=russia,serbia,ukraine,"
@@ -614,40 +649,22 @@ class HirifyAdapter(BaseAdapter):
                 "&specializations=qa_testing"
                 "&work_format=remote"
             ),
-
             card_selector=(
                 "div.vacancy-card[data-vacancy-id]"
             ),
-
             link_selector=(
                 "a[href*='/jobs/']"
             ),
-
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
                 "body",
             ),
-
-            # Пример Hirify:
-            #
-            # <div class="font-light text-[14px] text-tertiary">
-            #     23 дня назад
-            # </div>
-            #
-            # text-[14px] намеренно не используем.
-            #
-            # Основной устойчивый selector:
-            # div.font-light.text-tertiary
-            #
-            # Fallback:
-            # div[class*='text-tertiary']
             date_selectors=(
                 "div.font-light.text-tertiary",
                 "div[class*='text-tertiary']",
@@ -669,7 +686,6 @@ class TaylorAdapter(BaseAdapter):
         return AdapterSpec(
             key="taylor",
             name="Taylor",
-
             url=(
                 "https://taylor.kz/jobs/stack/qa"
                 "?q="
@@ -688,25 +704,53 @@ class TaylorAdapter(BaseAdapter):
                 "&with_salary="
                 "&recent="
             ),
-
             card_selector=(
-                'a[href*="/jobs/"][aria-label^="Открыть вакансию:"]'
+                'a[href*="/jobs/"]'
+                '[aria-label^="Открыть вакансию:"]'
             ),
-
             link_selector=(
-                'a[href*="/jobs/"][aria-label^="Открыть вакансию:"]'
+                'a[href*="/jobs/"]'
+                '[aria-label^="Открыть вакансию:"]'
             ),
-
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
                 "body",
+            ),
+
+            # Только обычные CSS-селекторы.
+            # Никаких :has-text().
+            detail_exclude_selectors=(
+                "[class*='similar']",
+                "[class*='similar-vacanc']",
+                "[class*='recommended']",
+                "[class*='recommend']",
+            ),
+
+            # Дополнительная защита:
+            # если рекомендации находятся внутри main и не имеют
+            # подходящего class, обрезаем текст по заголовку секции.
+            detail_cut_markers=(
+                "Похожие вакансии",
+                "Рекомендуемые вакансии",
+                "Рекомендованные вакансии",
+                "Смотреть подборки",
+                "Similar jobs",
+                "Similar vacancies",
+                "Recommended jobs",
+                "Recommended vacancies",
+            ),
+
+            date_selectors=(
+                "time",
+                "[class*='published']",
+                "[class*='date']",
+                "[class*='publish']",
             ),
         )
 
@@ -722,26 +766,17 @@ class JobRocketAdapter(BaseAdapter):
         return AdapterSpec(
             key="jobrocket",
             name="JobRocket",
-
             url=(
                 "https://jobrocket.ru/en?"
                 "page=1&categories=qa"
             ),
-
-            card_selector=(
-                'div[data-slot="card"]'
-            ),
-
-            link_selector=(
-                "a[href*='/job']"
-            ),
-
+            card_selector='div[data-slot="card"]',
+            link_selector="a[href*='/job']",
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
@@ -761,26 +796,21 @@ class TalantoAdapter(BaseAdapter):
         return AdapterSpec(
             key="talanto",
             name="Talanto",
-
             url=(
                 "https://talanto.work/"
                 "?offset=48&q=QA"
             ),
-
             card_selector=(
                 'a[aria-label][href^="/jobs/"]'
             ),
-
             link_selector=(
                 'a[aria-label][href^="/jobs/"]'
             ),
-
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
@@ -800,32 +830,21 @@ class GetMatchAdapter(BaseAdapter):
         return AdapterSpec(
             key="getmatch",
             name="GetMatch",
-
             url=(
-                "https://getmatch.ru/vacancies?"
-                "p=1"
+                "https://getmatch.ru/vacancies"
+                "?p=1"
                 "&sa=any"
-                "&pa=7d"
+                "&pa=all"
                 "&l=remote"
-                "&se=junior"
-                "&se=middle"
-                "&se=senior"
+                "&sp=qa_manual"
             ),
-
-            card_selector=(
-                "div.b-vacancy-card"
-            ),
-
-            link_selector=(
-                "a[href*='/vacancies/']"
-            ),
-
+            card_selector="div.b-vacancy-card",
+            link_selector="a[href*='/vacancies/']",
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
@@ -845,35 +864,33 @@ class GeekJobAdapter(BaseAdapter):
         return AdapterSpec(
             key="geekjob",
             name="GeekJob",
-
             url=(
-                "https://geekjob.ru/vacancies?"
-                "rm=1"
+                "https://geekjob.ru/vacancies"
+                "?rm=1"
                 "&t=2,32,276,277,278,279,45"
             ),
-
-            card_selector=(
-                "li.collection-item.avatar"
-            ),
-
-            link_selector=(
-                "a[href*='/vacancy']"
-            ),
-
+            card_selector="li.collection-item.avatar",
+            link_selector="a[href*='/vacancy']",
             title_selectors=(
                 "h2",
                 "h3",
                 ".title",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
                 "body",
             ),
+            detail_cut_markers=(
+                "Еще интересные вакансии",
+                "Ещё интересные вакансии",
+                "Другие вакансии",
+                "Похожие вакансии",
+                "Рекомендуемые вакансии",
+                "Рекомендованные вакансии",
+            ),
         )
-
 
 # ============================================================
 # RVC
@@ -886,7 +903,6 @@ class RVCAdapter(BaseAdapter):
         return AdapterSpec(
             key="rvc",
             name="RVC",
-
             url=(
                 "https://app.rvc.global/jobs?"
                 "salaryFloor=off"
@@ -904,23 +920,17 @@ class RVCAdapter(BaseAdapter):
                 "%2CRussia%2CTajikistan%2CTurkmenistan"
                 "%2CUzbekistan"
             ),
-
             card_selector=(
                 "article, "
                 "[class*='job-card'], "
                 "[class*='vacancy-card']"
             ),
-
-            link_selector=(
-                "a[href*='/jobs/']"
-            ),
-
+            link_selector="a[href*='/jobs/']",
             title_selectors=(
                 "h2",
                 "h3",
                 "[class*='title']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "article",
@@ -940,27 +950,18 @@ class LinkedInAdapter(BaseAdapter):
         return AdapterSpec(
             key="linkedin",
             name="LinkedIn",
-            url=(
-                "https://www.linkedin.com/feed/"
-            ),
-
+            url="https://www.linkedin.com/feed/",
             card_selector=(
                 'p[data-testid="expandable-text-box"]'
             ),
-
-            link_selector=(
-                "a[href]"
-            ),
-
+            link_selector="a[href]",
             title_selectors=(
                 "[data-testid='expandable-text-box']",
             ),
-
             detail_body_selectors=(
                 "main",
                 "body",
             ),
-
             requires_login=True,
             detail_pages=False,
         )
