@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 # ============================================================
 # ROLE DETECTION
 # ============================================================
