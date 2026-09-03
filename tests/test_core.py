@@ -38,3 +38,6 @@ def test_old_vacancy_is_rejected():
 def test_hours_and_russian_month_dates_are_parsed():
     assert evaluate(make("remote REST API Postman, 20 часов назад"), PROFILE, NOW).status == "recommended"
     assert evaluate(make("remote, обновлено 21 авг"), PROFILE, NOW).status == "needs_review"
+    assert evaluate(make("remote REST API, 13 ч. назад"), PROFILE, NOW).status == "recommended"
+    assert evaluate(make("remote REST API, 1 д. назад"), PROFILE, NOW).status == "recommended"
+    assert evaluate(make("remote REST API, 30 мин. назад"), PROFILE, NOW).status == "recommended"

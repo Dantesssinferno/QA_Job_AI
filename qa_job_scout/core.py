@@ -650,31 +650,42 @@ AUTOMATION_REQUIRED_RE = re.compile(
 
 
 DATE_PATTERNS = (
-    (re.compile(r"(сегодня|today)", re.IGNORECASE), 0),
-    (re.compile(r"(вчера|yesterday)", re.IGNORECASE), 1),
     (
         re.compile(
-            r"(\d+)\s*(?:мин(?:ут[ыа]?|\.)?|minutes?)\s*(?:назад|ago)?",
+            r"(сегодня|today)",
+            re.IGNORECASE,
+        ),
+        0,
+    ),
+    (
+        re.compile(
+            r"(вчера|yesterday)",
+            re.IGNORECASE,
+        ),
+        1,
+    ),
+    (
+        re.compile(
+            r"(\d+)\s*(?:мин(?:ут[ыа]?)?|мин\.?|minutes?)\s*(?:назад|ago)?",
             re.IGNORECASE,
         ),
         "minutes",
     ),
     (
         re.compile(
-            r"(\d+)\s*(?:час(?:а|ов)?|hours?)\s*(?:назад|ago)?",
+            r"(\d+)\s*(?:ч(?:ас(?:а|ов)?)?|ч\.?|hours?)\s*(?:назад|ago)?",
             re.IGNORECASE,
         ),
         "hours",
     ),
     (
         re.compile(
-            r"(\d+)\s*(?:д(?:ень|ня|ней)|days?)\s*(?:назад|ago)",
+            r"(\d+)\s*(?:д(?:ень|ня|ней)?|дн\.?|д\.?|days?)\s*(?:назад|ago)?",
             re.IGNORECASE,
         ),
-        None,
+        "days",
     ),
 )
-
 
 MONTHS = {
     "янв": 1,
@@ -758,12 +769,13 @@ def parse_age(
                     hours=int(match.group(1))
                 )
 
-            return now - timedelta(
-                days=(
-                    delta
-                    if delta is not None
-                    else int(match.group(1))
+            if delta == "days":
+                return now - timedelta(
+                    days=int(match.group(1))
                 )
+
+            return now - timedelta(
+                days=delta
             )
 
     month_match = re.search(
@@ -1108,26 +1120,19 @@ def evaluate(
     # 4. DATE
     # ============================================================
 
-    # В нормальном crawler-е дата должна находиться
-    # в published_text.
+    # Дата должна приходить от crawler-а из отдельного поля.
     #
-    # Но unit-тесты и некоторые сайты могут передавать дату
-    # внутри текста вакансии.
-    #
-    # Поэтому используем fallback:
-    #
-    # published_text -> description -> title
-
-    date_source = (
-        vacancy.published_text
-        or description
-        or title
+    # Не пытаемся угадывать дату по всему description:
+    # в описании могут встречаться даты, сроки, числа опыта,
+    # даты обновлений и данные из блоков рекомендаций.
+    date_source = " ".join(
+        vacancy.published_text.split()
     )
 
     date = parse_age(
         date_source,
         now,
-    )
+    ) if date_source else None
 
     vacancy.published_at = (
         date.isoformat()

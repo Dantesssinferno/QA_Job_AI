@@ -141,8 +141,12 @@ def print_rejection_reasons(
             "Причина не указана"
         ]
 
-        for reason in reasons:
-            reason_counter[reason] += 1
+        # В evaluate() причины добавляются последовательно:
+        # контекстные положительные признаки -> финальная причина reject/review.
+        # Для статистики нужна именно последняя причина, а не все промежуточные.
+        final_reason = reasons[-1]
+
+        reason_counter[final_reason] += 1
 
     for reason, count in reason_counter.most_common():
         print(

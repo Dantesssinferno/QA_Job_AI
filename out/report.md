@@ -40,17 +40,17 @@
 С уважением,
 Максим Старостенко
 
-## Manual QA инженер (Junior / Middle) — PartingPro.com (92/95)
-- Источник: Taylor
-- Ссылка: https://taylor.kz/jobs/manual-qa-inzener-partingprocom-at-partingpro
-- ID для review: `faf3bfccf956`
-- Почему: QA-позиция подтверждена по заголовку: Manual QA инженер (Junior / Middle) — PartingPro.com. Автоматизация не указана как обязательное требование. Удалённый формат подтверждён. Английский не указан как обязательное требование. Дата публикации не старше 5 дней. В вакансии подтверждено ручное тестирование. В вакансии есть API/backend-направление. Совпадения навыков: SQL. QA + API является сильным совпадением с профилем кандидата.
+## QA Engineer - Backend (Golang) Middle+ (Risk Technology) (94/95)
+- Источник: Hirify
+- Ссылка: https://hirify.me/jobs/832505-middle-backend-qa-golang
+- ID для review: `638bd8ec01a9`
+- Почему: QA-позиция подтверждена по заголовку: QA Engineer - Backend (Golang) Middle+ (Risk Technology). Автоматизация не указана как обязательное требование. Удалённый формат подтверждён. Английский не указан как обязательное требование. Дата публикации не старше 5 дней. В вакансии подтверждено ручное тестирование. В вакансии есть API/backend-направление. Совпадения навыков: regression testing, SQL. QA + API является сильным совпадением с профилем кандидата.
 
 ### Черновик письма
 
 Здравствуйте!
 
-Заинтересовала вакансия Manual QA инженер (Junior / Middle) — PartingPro.com. Я QA Engineer (manual / API / backend) из Молдова; мой основной фокус - ручное тестирование backend/API, интеграций и бизнес-логики.
+Заинтересовала вакансия QA Engineer - Backend (Golang) Middle+ (Risk Technology). Я QA Engineer (manual / API / backend) из Молдова; мой основной фокус - ручное тестирование backend/API, интеграций и бизнес-логики.
 
 Тестировал backend B2B iGaming-платформы, REST API, игровые интеграции и транзакционные сценарии Bet, Win, Refund и Rollback. Создал тестовую базу из 410 тест-кейсов и обеспечил 58,9% покрытия критичного функционала.
 

@@ -1,8 +1,9 @@
-"""Site-specific vacancy adapters with parallel detail-page collection."""
+"""Site-specific vacancy adapters with resilient extraction and source-aware fallbacks."""
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -57,17 +58,11 @@ class BaseAdapter:
     spec: AdapterSpec
 
     page_timeout_ms = int(
-        os.getenv(
-            "PAGE_TIMEOUT_MS",
-            "20000",
-        )
+        os.getenv("PAGE_TIMEOUT_MS", "20000")
     )
 
     selector_timeout_ms = int(
-        os.getenv(
-            "SELECTOR_TIMEOUT_MS",
-            "7000",
-        )
+        os.getenv("SELECTOR_TIMEOUT_MS", "7000")
     )
 
     def __init__(self) -> None:
@@ -76,15 +71,40 @@ class BaseAdapter:
         self.max_vacancies = max(
             1,
             int(
-                os.getenv(
-                    "MAX_VACANCIES",
-                    "25",
-                )
+                os.getenv("MAX_VACANCIES", "25")
             ),
         )
 
     def get_spec(self) -> AdapterSpec:
         raise NotImplementedError
+
+    async def _goto(
+        self,
+        page: Page,
+        url: str,
+    ) -> None:
+        """
+        Безопасная навигация.
+
+        Некоторые агрегаторы долго ждут сторонние ресурсы,
+        поэтому сначала пробуем domcontentloaded, а после timeout
+        используем commit и продолжаем работу с DOM.
+        """
+        try:
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=self.page_timeout_ms,
+            )
+            return
+        except PlaywrightTimeoutError:
+            pass
+
+        await page.goto(
+            url,
+            wait_until="commit",
+            timeout=self.page_timeout_ms,
+        )
 
     async def _first_text(
         self,
@@ -92,9 +112,7 @@ class BaseAdapter:
         selectors: Iterable[str],
     ) -> str:
         for selector in selectors:
-            locator = page.locator(
-                selector
-            ).first
+            locator = page.locator(selector).first
 
             try:
                 if await locator.count() and await locator.is_visible():
@@ -115,19 +133,8 @@ class BaseAdapter:
         text: str,
     ) -> str:
         """
-        Обрезает текст после начала нерелевантных секций.
-
-        Например:
-
-            Основной текст вакансии
-
-            Похожие вакансии
-            Senior Automation QA Engineer
-            AQA Engineer
-
-        превращается в:
-
-            Основной текст вакансии
+        Обрезает описание после блока похожих/рекомендованных вакансий
+        и других агрегаторских разделов.
         """
         if not text:
             return ""
@@ -149,16 +156,11 @@ class BaseAdapter:
         page: Page,
     ) -> str:
         """
-        Извлекает основной текст текущей вакансии.
-
-        Сначала удаляются явно нерелевантные DOM-блоки,
-        затем текст обрезается по маркерам вроде
-        "Похожие вакансии".
+        Извлекает текст основной вакансии и удаляет известные
+        нерелевантные DOM-блоки.
         """
         for selector in self.spec.detail_body_selectors:
-            locator = page.locator(
-                selector
-            ).first
+            locator = page.locator(selector).first
 
             try:
                 if not await locator.count():
@@ -167,12 +169,6 @@ class BaseAdapter:
                 if not await locator.is_visible():
                     continue
 
-                # Удаляем явно нерелевантные элементы из DOM.
-                #
-                # ВАЖНО:
-                # Здесь должны использоваться только обычные CSS-селекторы.
-                # Playwright-специфические :has-text() сюда помещать нельзя,
-                # потому что внутри evaluate() используется querySelectorAll().
                 if self.spec.detail_exclude_selectors:
                     await locator.evaluate(
                         """
@@ -202,19 +198,70 @@ class BaseAdapter:
 
         return ""
 
+    async def _extract_date_from_text(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Fallback для сайтов без стабильного date selector.
+
+        Поддерживает формы:
+        - сегодня / yesterday
+        - 3 дн. назад
+        - 3 дня назад
+        - 13 ч. назад
+        - 20 часов назад
+        - 10 мин. назад
+        - 31 авг
+        - 27 августа 2026
+        """
+        if not text:
+            return ""
+
+        normalized = " ".join(
+            text.split()
+        )
+
+        patterns = (
+            r"\b(?:сегодня|today|вчера|yesterday)\b",
+            r"\b\d+\s*(?:д\.|дн\.|день|дня|дней|days?)\s*(?:назад|ago)\b",
+            r"\b\d+\s*(?:ч\.|час|часа|часов|hours?)\s*(?:назад|ago)\b",
+            r"\b\d+\s*(?:мин\.|минут|минуты|minutes?)\s*(?:назад|ago)\b",
+            r"\b\d{1,2}\s+[а-яё]{3,}(?:\s+\d{4})?\b",
+            r"\b\d{1,2}\s+[a-z]{3,}(?:\s+\d{4})?\b",
+        )
+
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                normalized,
+                re.IGNORECASE,
+            )
+
+            if match:
+                return match.group(0)
+
+        return ""
+
     async def list_cards(
         self,
         page: Page,
     ) -> list[dict[str, str]]:
-        await page.goto(
+        await self._goto(
+            page,
             self.spec.url,
-            wait_until="domcontentloaded",
-            timeout=self.page_timeout_ms,
         )
 
         cards = page.locator(
             self.spec.card_selector
         )
+
+        # Если контейнер карточки поменялся,
+        # пробуем стабильные ссылки вакансий.
+        if await cards.count() == 0:
+            cards = page.locator(
+                self.spec.link_selector
+            )
 
         await cards.first.wait_for(
             state="attached",
@@ -308,10 +355,9 @@ class BaseAdapter:
         page: Page,
         card: dict[str, str],
     ) -> Vacancy:
-        await page.goto(
+        await self._goto(
+            page,
             card["href"],
-            wait_until="domcontentloaded",
-            timeout=self.page_timeout_ms,
         )
 
         try:
@@ -321,7 +367,6 @@ class BaseAdapter:
                 state="attached",
                 timeout=self.selector_timeout_ms,
             )
-
         except PlaywrightTimeoutError:
             pass
 
@@ -345,17 +390,20 @@ class BaseAdapter:
             self.spec.date_selectors,
         )
 
+        # CSS selector мог не сработать. Тогда ищем дату
+        # в очищенном основном тексте, а затем в карточке.
+        if not date:
+            date = await self._extract_date_from_text(
+                body
+            )
+
+        if not date:
+            date = await self._extract_date_from_text(
+                card["text"]
+            )
+
         all_text = (
             f"{card['text']}\n{body}"
-        )
-
-        # Если date selector не найден,
-        # не используем весь detail body как источник даты.
-        #
-        # Фолбэк только на текст карточки.
-        published_text = (
-            date
-            or card["text"]
         )
 
         return Vacancy(
@@ -368,8 +416,8 @@ class BaseAdapter:
                 all_text.split()
             ),
             published_text=" ".join(
-                published_text.split()
-            ),
+                date.split()
+            ) if date else "",
             remote=any(
                 word in all_text.lower()
                 for word in (
@@ -395,7 +443,6 @@ class BaseAdapter:
                     page,
                     card,
                 )
-
             finally:
                 await page.close()
 
@@ -415,26 +462,21 @@ class BaseAdapter:
             cards = await self.list_cards(
                 page
             )
-
             run.listed = len(cards)
 
         except Exception as exc:  # noqa: BLE001
             run.status = "failed"
-
             run.errors.append(
                 f"Список: "
                 f"{type(exc).__name__}: {exc}"
             )
-
             return [], run
 
         if not cards:
             run.status = "failed"
-
             run.errors.append(
                 "Карточки вакансий не найдены."
             )
-
             return [], run
 
         if not self.spec.detail_pages:
@@ -443,9 +485,7 @@ class BaseAdapter:
                 for card in cards
             ]
 
-            run.detailed = 0
             run.collected = len(vacancies)
-
             return vacancies, run
 
         if (
@@ -462,16 +502,13 @@ class BaseAdapter:
                     )
 
                     run.detailed += 1
-                    vacancies.append(
-                        vacancy
-                    )
+                    vacancies.append(vacancy)
 
                 except Exception as exc:  # noqa: BLE001
                     run.errors.append(
                         f"{card['href']}: "
                         f"{type(exc).__name__}: {exc}"
                     )
-
         else:
 
             async def one(
@@ -483,7 +520,6 @@ class BaseAdapter:
                         card,
                         detail_semaphore,
                     )
-
                 except Exception as exc:  # noqa: BLE001
                     return card, exc
 
@@ -507,22 +543,48 @@ class BaseAdapter:
                         f"{card['href']}: "
                         f"{type(exc).__name__}: {exc}"
                     )
-
                 else:
                     run.detailed += 1
                     vacancies.append(result)
 
-        run.collected = len(
-            vacancies
-        )
+        run.collected = len(vacancies)
 
         if run.errors and not vacancies:
             run.status = "failed"
-
         elif run.errors:
             run.status = "partial"
 
         return vacancies, run
+
+
+# ============================================================
+# COMMON CLEANUP MARKERS
+# ============================================================
+
+
+GENERIC_EXCLUDE_SELECTORS = (
+    "[class*='similar']",
+    "[class*='recommended']",
+    "[class*='recommend']",
+    "[class*='related']",
+)
+
+
+GENERIC_CUT_MARKERS = (
+    "Похожие вакансии",
+    "Рекомендуемые вакансии",
+    "Рекомендованные вакансии",
+    "Больше вакансий",
+    "Ещё больше вакансий",
+    "Еще больше вакансий",
+    "Другие вакансии",
+    "Similar jobs",
+    "Similar vacancies",
+    "Recommended jobs",
+    "Recommended vacancies",
+    "Related jobs",
+    "Related vacancies",
+)
 
 
 # ============================================================
@@ -552,7 +614,16 @@ class HireHiAdapter(BaseAdapter):
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
+                "article",
                 "body",
+            ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=(
+                *GENERIC_CUT_MARKERS,
+                "Мэтч & Сопровод",
+                "Статьи для QA-инженеров",
+                "статьи для QA-инженеров",
+                "Про зарплаты",
             ),
             date_selectors=(
                 ".vacancy-published-date",
@@ -577,7 +648,12 @@ class RocketHuntAdapter(BaseAdapter):
             name="RocketHunt",
             url="https://rockethunt.ai/ru?text=QA",
             card_selector="article.cv-card",
-            link_selector="a[href]",
+            link_selector=(
+                "a[href*='/jobs/'], "
+                "a[href*='/job/'], "
+                "a[href*='/vacancies/'], "
+                "a[href*='/vacancy/']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -588,6 +664,8 @@ class RocketHuntAdapter(BaseAdapter):
                 "article",
                 "body",
             ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=GENERIC_CUT_MARKERS,
         )
 
 
@@ -609,8 +687,12 @@ class DreamJobAdapter(BaseAdapter):
                 "&jbfrp%5BonlyWithSalary%5D=0"
                 "&jbfrp%5BorderBy%5D=relevance"
             ),
-            card_selector="div.vacancy-new.vacancy-new__item",
-            link_selector="a[href*='/vacancy']",
+            card_selector=(
+                "div.vacancy-new.vacancy-new__item"
+            ),
+            link_selector=(
+                "a[href*='/vacancy']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -619,8 +701,11 @@ class DreamJobAdapter(BaseAdapter):
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
+                "article",
                 "body",
             ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=GENERIC_CUT_MARKERS,
         )
 
 
@@ -663,7 +748,14 @@ class HirifyAdapter(BaseAdapter):
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
+                "article",
                 "body",
+            ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=(
+                *GENERIC_CUT_MARKERS,
+                "Мэтч & Сопровод",
+                "Реклама",
             ),
             date_selectors=(
                 "div.font-light.text-tertiary",
@@ -722,30 +814,15 @@ class TaylorAdapter(BaseAdapter):
                 "article",
                 "body",
             ),
-
-            # Только обычные CSS-селекторы.
-            # Никаких :has-text().
             detail_exclude_selectors=(
-                "[class*='similar']",
-                "[class*='similar-vacanc']",
-                "[class*='recommended']",
-                "[class*='recommend']",
+                *GENERIC_EXCLUDE_SELECTORS,
+                "[class*='salary']",
             ),
-
-            # Дополнительная защита:
-            # если рекомендации находятся внутри main и не имеют
-            # подходящего class, обрезаем текст по заголовку секции.
             detail_cut_markers=(
-                "Похожие вакансии",
-                "Рекомендуемые вакансии",
-                "Рекомендованные вакансии",
+                *GENERIC_CUT_MARKERS,
                 "Смотреть подборки",
-                "Similar jobs",
-                "Similar vacancies",
-                "Recommended jobs",
-                "Recommended vacancies",
+                "Вакансии в Telegram-канале",
             ),
-
             date_selectors=(
                 "time",
                 "[class*='published']",
@@ -771,7 +848,9 @@ class JobRocketAdapter(BaseAdapter):
                 "page=1&categories=qa"
             ),
             card_selector='div[data-slot="card"]',
-            link_selector="a[href*='/job']",
+            link_selector=(
+                "a[href*='/job']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -782,6 +861,8 @@ class JobRocketAdapter(BaseAdapter):
                 "article",
                 "body",
             ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=GENERIC_CUT_MARKERS,
         )
 
 
@@ -798,7 +879,7 @@ class TalantoAdapter(BaseAdapter):
             name="Talanto",
             url=(
                 "https://talanto.work/"
-                "?offset=48&q=QA"
+                "?offset=0&q=QA"
             ),
             card_selector=(
                 'a[aria-label][href^="/jobs/"]'
@@ -815,6 +896,19 @@ class TalantoAdapter(BaseAdapter):
                 "main",
                 "article",
                 "body",
+            ),
+            detail_exclude_selectors=(
+                *GENERIC_EXCLUDE_SELECTORS,
+                "[class*='article']",
+            ),
+            detail_cut_markers=(
+                *GENERIC_CUT_MARKERS,
+            ),
+            date_selectors=(
+                "time",
+                "[class*='date']",
+                "[class*='published']",
+                "[class*='publish']",
             ),
         )
 
@@ -838,8 +932,12 @@ class GetMatchAdapter(BaseAdapter):
                 "&l=remote"
                 "&sp=qa_manual"
             ),
-            card_selector="div.b-vacancy-card",
-            link_selector="a[href*='/vacancies/']",
+            card_selector=(
+                "div.b-vacancy-card"
+            ),
+            link_selector=(
+                "a[href*='/vacancies/']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -848,7 +946,16 @@ class GetMatchAdapter(BaseAdapter):
             detail_body_selectors=(
                 "main",
                 "[class*='vacancy']",
+                "article",
                 "body",
+            ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=(
+                *GENERIC_CUT_MARKERS,
+                "Больше вакансий",
+                "Похожие вакансии",
+                "Ещё 17 похожих вакансий",
+                "Ещё вакансии",
             ),
         )
 
@@ -869,8 +976,12 @@ class GeekJobAdapter(BaseAdapter):
                 "?rm=1"
                 "&t=2,32,276,277,278,279,45"
             ),
-            card_selector="li.collection-item.avatar",
-            link_selector="a[href*='/vacancy']",
+            card_selector=(
+                "li.collection-item.avatar"
+            ),
+            link_selector=(
+                "a[href*='/vacancy']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -882,15 +993,15 @@ class GeekJobAdapter(BaseAdapter):
                 "article",
                 "body",
             ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
             detail_cut_markers=(
+                *GENERIC_CUT_MARKERS,
                 "Еще интересные вакансии",
                 "Ещё интересные вакансии",
                 "Другие вакансии",
-                "Похожие вакансии",
-                "Рекомендуемые вакансии",
-                "Рекомендованные вакансии",
             ),
         )
+
 
 # ============================================================
 # RVC
@@ -925,7 +1036,9 @@ class RVCAdapter(BaseAdapter):
                 "[class*='job-card'], "
                 "[class*='vacancy-card']"
             ),
-            link_selector="a[href*='/jobs/']",
+            link_selector=(
+                "a[href*='/jobs/']"
+            ),
             title_selectors=(
                 "h2",
                 "h3",
@@ -936,6 +1049,8 @@ class RVCAdapter(BaseAdapter):
                 "article",
                 "body",
             ),
+            detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            detail_cut_markers=GENERIC_CUT_MARKERS,
         )
 
 
@@ -965,11 +1080,6 @@ class LinkedInAdapter(BaseAdapter):
             requires_login=True,
             detail_pages=False,
         )
-
-
-# ============================================================
-# ENABLED ADAPTERS
-# ============================================================
 
 
 def enabled_adapters() -> tuple[BaseAdapter, ...]:
