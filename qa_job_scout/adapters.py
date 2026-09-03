@@ -34,6 +34,8 @@ class AdapterSpec:
         "time",
         "[datetime]",
     )
+    date_fallback_to_detail_text: bool = True
+    date_fallback_to_card_text: bool = True
     vacancy_url_pattern: str | None = None
     excluded_url_patterns: tuple[str, ...] = ()
     detail_wait_selector: str = "h1"
@@ -483,12 +485,12 @@ class BaseAdapter:
             self.spec.date_selectors,
         )
 
-        if not date:
+        if not date and self.spec.date_fallback_to_detail_text:
             date = await self._extract_date_from_text(
                 body
             )
 
-        if not date:
+        if not date and self.spec.date_fallback_to_card_text:
             date = await self._extract_date_from_text(
                 card["text"]
             )
@@ -688,12 +690,7 @@ class HireHiAdapter(BaseAdapter):
         return AdapterSpec(
             key="hirehi",
             name="HireHi",
-            url=(
-                "https://hirehi.ru/vacancies/"
-                "manual-qa?"
-                "format=%D1%83%D0%B4%D0%B0%D0%BB%D1%91%D0%BD%D0%BD%D0%BE"
-                "&search=QA"
-            ),
+            url="https://hirehi.ru/vacancies/manual-qa",
             card_selector="a.job-card[data-id]",
             link_selector="a.job-card[data-id]",
             title_selectors=(
@@ -721,7 +718,6 @@ class HireHiAdapter(BaseAdapter):
                 "time",
                 "[datetime]",
             ),
-            vacancy_url_pattern=r"^https?://(?:www\.)?hirehi\.ru/qa/[^/?#]+-\d+(?:[?#].*)?$",
         )
 
 
@@ -732,9 +728,7 @@ class RocketHuntAdapter(BaseAdapter):
             name="RocketHunt",
             url="https://rockethunt.ai/ru?text=QA",
             card_selector="article.cv-card",
-            link_selector=(
-                "a[href*='/vacancies/']"
-            ),
+            link_selector="a[href]",
             title_selectors=(
                 "h2",
                 "h3",
@@ -747,15 +741,12 @@ class RocketHuntAdapter(BaseAdapter):
             ),
             detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
             detail_cut_markers=GENERIC_CUT_MARKERS,
+            excluded_url_patterns=(
+                "/vakansii/vacancy-testirovschik",
+            ),
             date_selectors=(
                 "time",
                 "[datetime]",
-            ),
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?rockethunt\.ai/"
-                r"(?:ru|en)/vacancies/"
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                r"[0-9a-f]{4}-[0-9a-f]{12}(?:[?#].*)?$"
             ),
         )
 
@@ -765,18 +756,11 @@ class DreamJobAdapter(BaseAdapter):
         return AdapterSpec(
             key="dreamjob",
             name="DreamJob",
-            url=(
-                "https://dreamjob.ru/vakansii?"
-                "jbfrp%5Btext%5D=QA"
-                "&jbfrp%5Bsalary%5D="
-                "&jbfrp%5BonlyWithSalary%5D=0"
-                "&jbfrp%5BorderBy%5D=relevance"
-            ),
-            card_selector=(
-                "a[href*='/employers/'][href*='/vakansii/']"
-            ),
+            url="https://dreamjob.ru/vakansii/vacancy-testirovschik?jbfrp%5Btext%5D=QA",
+            card_selector="div.vacancy-new.vacancy-new__item",
             link_selector=(
-                "a[href*='/employers/'][href*='/vakansii/']"
+                "a[href*='/vakansii/'], a[href*='/vacancy/'],"
+                "a[href*='/vacancy']"
             ),
             title_selectors=(
                 "h2",
@@ -791,14 +775,13 @@ class DreamJobAdapter(BaseAdapter):
             ),
             detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
             detail_cut_markers=GENERIC_CUT_MARKERS,
+            excluded_url_patterns=(
+                "/vakansii/vacancy-",
+            ),
             date_selectors=(
                 "time",
                 "[datetime]",
                 "[class*='published']",
-            ),
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?dreamjob\.ru/"
-                r"employers/\d+/(?:vakansii|vacancies)/\d+/?(?:[?#].*)?$"
             ),
         )
 
@@ -809,18 +792,12 @@ class HirifyAdapter(BaseAdapter):
             key="hirify",
             name="Hirify",
             url=(
-                "https://hirify.me/?"
-                "countries=russia,serbia,ukraine,"
-                "armenia,romania,cyprus,latvia,"
-                "czech_republic,kazakhstan,europe,"
-                "georgia,turkey,croatia,azerbaijan,"
-                "uzbekistan,vietnam,belarus,bulgaria,"
-                "thailand,moldova"
-                "&regions=russia,europe"
-                "&remote_type=global"
-                "&skills_match_type=OR"
-                "&specializations=qa_testing"
-                "&work_format=remote"
+                "https://hirify.me/?countries=russia,ukraine,poland,armenia,spain,romania,cyprus,"
+                "czech_republic,latvia,kazakhstan,portugal,netherlands,georgia,turkey,croatia,germany,"
+                "azerbaijan,bulgaria,belarus,vietnam,uzbekistan,greece,slovakia,lithuania,thailand,"
+                "kyrgyzstan,moldova,turkmenistan,tajikistan,limassol,yerevan,tbilisi,belgrade,astana,"
+                "slovenia,riga&domains=fintech,gamedev&excluded_skills=manual%20qa&regions=russia,cis&"
+                "skills=qa,python&specializations=qa_testing"
             ),
             card_selector=(
                 "div.vacancy-card[data-vacancy-id]"
@@ -864,22 +841,9 @@ class TaylorAdapter(BaseAdapter):
             key="taylor",
             name="Taylor",
             url=(
-                "https://taylor.kz/jobs/stack/qa"
-                "?q="
-                "&stack=qa"
-                "&source="
-                "&city="
-                "&remote="
-                "&sort=recent"
-                "&seniority="
-                "&format="
-                "&salary="
-                "&direct="
-                "&region="
-                "&hide_applied="
-                "&hide_viewed="
-                "&with_salary="
-                "&recent="
+                "https://taylor.kz/jobs/stack/qa?q=&stack=qa&source=&city=&remote="
+                "&sort=recent&seniority=&format=&salary=&direct=&region=&hide_applied="
+                "&hide_viewed=&with_salary=&recent="
             ),
             card_selector=(
                 'a[href*="/jobs/"]'
@@ -925,13 +889,8 @@ class JobRocketAdapter(BaseAdapter):
         return AdapterSpec(
             key="jobrocket",
             name="JobRocket",
-            url=(
-                "https://jobrocket.ru/en?"
-                "page=1&categories=qa"
-            ),
-            card_selector=(
-                'a[href^="https://jobrocket.ru/job/"]'
-            ),
+            url="https://jobrocket.ru/en?page=1&categories=qa",
+            card_selector='div[data-slot="card"]',
             link_selector=(
                 'a[href*="/job/"]'
             ),
@@ -951,10 +910,6 @@ class JobRocketAdapter(BaseAdapter):
                 "time",
                 "[datetime]",
             ),
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?jobrocket\.ru/"
-                r"job/[^/?#]+-[0-9a-f]{8}(?:[?#].*)?$"
-            ),
         )
 
 
@@ -964,8 +919,11 @@ class TalantoAdapter(BaseAdapter):
             key="talanto",
             name="Talanto",
             url=(
-                "https://talanto.work/"
-                "?offset=0&q=QA"
+                "https://talanto.work/?q=QA&vacancy_langs=Ru"
+                "&regions=Russia&regions=Europe&regions=Belarus"
+                "&regions=Kazakhstan&regions=Uzbekistan&regions=Ukraine"
+                "&regions=Georgia&regions=Armenia&regions=Azerbaijan"
+                "&regions=Kyrgyzstan&regions=Moldova&regions=Tajikistan"
             ),
             card_selector=(
                 'a[aria-label][href^="/jobs/"]'
@@ -992,11 +950,6 @@ class TalantoAdapter(BaseAdapter):
                 "time",
                 "[datetime]",
             ),
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?talanto\.work/jobs/"
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                r"[0-9a-f]{4}-[0-9a-f]{12}(?:[?#].*)?$"
-            ),
         )
 
 
@@ -1007,17 +960,26 @@ class GetMatchAdapter(BaseAdapter):
             name="GetMatch",
             url=(
                 "https://getmatch.ru/vacancies"
-                "?p=1"
-                "&sa=any"
-                "&pa=all"
-                "&l=remote"
-                "&sp=qa_manual"
+                "?p=1&sa=any&pa=7d&l=remote"
+                "&se=junior&se=middle&se=senior&sp=qa_manual"
             ),
             card_selector=(
                 "div.b-vacancy-card"
             ),
             link_selector=(
                 "div.b-vacancy-card a[href*='/vacancies/']"
+            ),
+            excluded_url_patterns=(
+                "?s=vacancies_seo_links_",
+                "?s=vacancies_seo_links_more_vacancies",
+                "?s=vacancies_seo_links_similar_vacancies",
+                "/vacancies/qa_manual/",
+                "/vacancies/moscow",
+                "/vacancies/spb",
+                "/vacancies/junior",
+                "/vacancies/middle",
+                "/vacancies/senior",
+                "/vacancies/remote",
             ),
             title_selectors=(
                 "h2",
@@ -1038,15 +1000,13 @@ class GetMatchAdapter(BaseAdapter):
                 "Ещё 17 похожих вакансий",
                 "Ещё вакансии",
             ),
-            date_selectors=(
-                "time",
-                "[datetime]",
-                "[class*='published']",
-            ),
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?getmatch\.ru/"
-                r"vacancies/\d+-[^/?#]+(?:\?s=offers)?$"
-            ),
+            # GetMatch does not expose a reliable publication-date
+            # field on these vacancy pages. Do NOT scan the whole page
+            # for date-like text: blocks such as "Требуемый опыт: 3 года"
+            # would be incorrectly interpreted as the publication date.
+            date_selectors=(),
+            date_fallback_to_detail_text=False,
+            date_fallback_to_card_text=False,
         )
 
 
@@ -1055,11 +1015,7 @@ class GeekJobAdapter(BaseAdapter):
         return AdapterSpec(
             key="geekjob",
             name="GeekJob",
-            url=(
-                "https://geekjob.ru/vacancies"
-                "?rm=1"
-                "&t=2,32,276,277,278,279,45"
-            ),
+            url="https://geekjob.ru/vacancies?rm=1&qs=QA",
             card_selector=(
                 "li.collection-item.avatar"
             ),
@@ -1084,13 +1040,16 @@ class GeekJobAdapter(BaseAdapter):
                 "Ещё интересные вакансии",
                 "Другие вакансии",
             ),
-            date_selectors=(
-                "time",
-                "[datetime]",
-            ),
             vacancy_url_pattern=(
                 r"^https?://(?:www\.)?geekjob\.ru/vacancy/"
                 r"[0-9a-f]{24}(?:[?#].*)?$"
+            ),
+            # На GeekJob на странице вакансии есть блок "Еще интересные вакансии"
+            # с собственными датами. Нельзя искать дату по всей странице:
+            # Playwright может взять дату из article[4] вместо основной вакансии
+            # (article[1]). Используем селектор именно из header основной карточки.
+            date_selectors=(
+                "xpath=//*[@id=\"body\"]/section/article[1]/section/header/div[6]",
             ),
         )
 
@@ -1102,26 +1061,30 @@ class RVCAdapter(BaseAdapter):
             name="RVC",
             url=(
                 "https://app.rvc.global/jobs?"
-                "salaryFloor=off"
+                "jobFunction=QA"
+                "&keyCompetency=Manual+QA"
+                "&workArrangement=FULLY_REMOTE%2CREMOTE_IN_COUNTRY"
+                "&includeLanguages=EN%2CGB"
+                "&countries=Czech+Republic%2CGeorgia%2CSerbia%2CUkraine"
+                "%2CKazakhstan%2CBelarus%2CAzerbaijan%2CKyrgyzstan"
+                "%2CMoldova%2CRussia%2CTajikistan%2CTurkmenistan"
                 "&keyword=QA"
-                "&jobFunction=QA"
-                "&keyCompetency=Other+%2F+Unspecified"
-                "&workArrangement=REMOTE_IN_COUNTRY"
-                "&includeLanguages=RU%2CEN%2CGB"
-                "&employmentType=FULL_TIME"
-                "&countries=Cyprus%2CCzech+Republic%2CGeorgia"
-                "%2CGreece%2CLatvia%2CPoland%2CPortugal"
-                "%2CRomania%2CSlovakia%2CSerbia%2CUkraine"
-                "%2CArmenia%2CAzerbaijan%2CBelarus"
-                "%2CKazakhstan%2CKyrgyzstan%2CMoldova"
-                "%2CRussia%2CTajikistan%2CTurkmenistan"
-                "%2CUzbekistan"
             ),
             card_selector=(
                 "article, [class*='job-card'], [class*='vacancy-card']"
             ),
             link_selector=(
-                "a[href*='/vacancy/view/']"
+                "a[href*='?job='], a[href*='&job=']"
+            ),
+            excluded_url_patterns=(
+                "/jobs/python-remote",
+                "/jobs/fully-remote-",
+                "/jobs/remote-jobs",
+                "/jobs/senior",
+                "/jobs/middle",
+                "/jobs/junior",
+                "/jobs/us-emea",
+                "/jobs/remote-csharp-dotnet",
             ),
             title_selectors=(
                 "h2",
@@ -1139,10 +1102,6 @@ class RVCAdapter(BaseAdapter):
                 "time",
                 "[datetime]",
             ),
-            vacancy_url_pattern=(
-                r"^https?://app\.rvc\.global/vacancy/view/"
-                r"[^/?#]+(?:[?#].*)?$"
-            ),
         )
 
 
@@ -1151,16 +1110,21 @@ class LinkedInAdapter(BaseAdapter):
         return AdapterSpec(
             key="linkedin",
             name="LinkedIn",
-            url="https://www.linkedin.com/feed/",
+            url=(
+                "https://www.linkedin.com/search/results/all/?"
+                "keywords=%23hiring%20%22QA%22&origin=HISTORY&position=0"
+            ),
             card_selector=(
                 "div.feed-shared-update-v2"
             ),
             link_selector=(
-                "div.feed-shared-update-v2 a[href*='/posts/']"
+                "div.feed-shared-update-v2 a[href*='/posts/'],"
+                "div.feed-shared-update-v2 a[href*='/feed/update/urn:li:activity:']"
             ),
             title_selectors=(
                 "[data-testid='expandable-text-box']",
                 ".feed-shared-update-v2__description",
+                ".update-components-text",
             ),
             detail_body_selectors=(
                 "main",
@@ -1170,9 +1134,6 @@ class LinkedInAdapter(BaseAdapter):
             detail_cut_markers=GENERIC_CUT_MARKERS,
             requires_login=True,
             detail_pages=False,
-            vacancy_url_pattern=(
-                r"^https?://(?:www\.)?linkedin\.com/posts/"
-            ),
         )
 
 

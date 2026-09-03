@@ -30,6 +30,7 @@ def test_source_specific_date_selectors_exist():
 
     assert ".vacancy-published-date" in adapters["hirehi"].spec.date_selectors
     assert "div.font-light.text-tertiary" in adapters["hirify"].spec.date_selectors
+    assert "xpath=//*[@id=\"body\"]/section/article[1]/section/header/div[6]" in adapters["geekjob"].spec.date_selectors
 
 
 def test_source_vacancy_url_validation_rejects_navigation_links():

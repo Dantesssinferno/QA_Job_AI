@@ -41,3 +41,19 @@ def test_hours_and_russian_month_dates_are_parsed():
     assert evaluate(make("remote REST API, 13 ч. назад"), PROFILE, NOW).status == "recommended"
     assert evaluate(make("remote REST API, 1 д. назад"), PROFILE, NOW).status == "recommended"
     assert evaluate(make("remote REST API, 30 мин. назад"), PROFILE, NOW).status == "recommended"
+
+
+
+def test_date_parser_does_not_treat_skill_text_as_date():
+    from qa_job_scout.core import parse_age
+
+    now = NOW
+    assert parse_age("1 PostgreSQL", now) is None
+    assert parse_age("3 навыка", now) is None
+
+
+def test_date_parser_supports_weeks_and_years():
+    from qa_job_scout.core import parse_age
+
+    assert parse_age("1 неделя", NOW) == NOW - __import__("datetime").timedelta(days=7)
+    assert parse_age("2 года", NOW) == NOW - __import__("datetime").timedelta(days=730)
