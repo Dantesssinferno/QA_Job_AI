@@ -779,7 +779,7 @@ def parse_age(
             )
 
     month_match = re.search(
-        r"\b(\d{1,2})\s+([а-яё]{3,}|[a-z]{3,})(?:\s+(\d{4}))?\b",
+        r"(?:^|\s)(\d{1,2})\s+([а-яё]{3,}|[a-z]{3,})(?:\s+(\d{4}))?(?=\s|$)",
         clean,
         re.IGNORECASE,
     )
