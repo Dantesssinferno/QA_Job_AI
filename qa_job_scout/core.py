@@ -504,9 +504,7 @@ def parse_age(
             clean,
         )
         if iso_match:
-            parsed = datetime.fromisoformat(
-                iso_match.group(0).replace("Z", "+00:00")
-            )
+            parsed = datetime.fromisoformat(iso_match.group(0))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=UTC)
             return parsed.astimezone(UTC)
