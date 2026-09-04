@@ -14,7 +14,7 @@ def test_every_enabled_source_has_a_dedicated_adapter_and_selectors():
         "getmatch",
         "geekjob",
         "rvc",
-        "linkedin",
+        "hhru",
     }
     assert all(
         adapter.spec.card_selector and adapter.spec.link_selector
@@ -93,4 +93,33 @@ def test_dreamjob_detail_url_validation():
     )
     assert not adapter.is_valid_vacancy_url(
         "https://dreamjob.ru/vakansii/vacancy-qa-engineer"
+    )
+
+
+def test_hh_adapter_configuration():
+    adapter = next(
+        adapter
+        for adapter in enabled_adapters()
+        if adapter.spec.key == "hhru"
+    )
+
+    assert adapter.spec.url == "https://api.hh.ru/vacancies"
+    assert adapter.spec.key == "hhru"
+
+
+def test_hh_remote_detection_from_work_format():
+    adapter = next(
+        adapter
+        for adapter in enabled_adapters()
+        if adapter.spec.key == "hhru"
+    )
+
+    assert adapter._is_remote(
+        {},
+        {"work_format": [{"id": "REMOTE", "name": "Из дома"}]},
+    )
+
+    assert not adapter._is_remote(
+        {},
+        {"work_format": [{"id": "ON_SITE", "name": "На месте работодателя"}]},
     )

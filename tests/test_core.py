@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from qa_job_scout.core import Vacancy, evaluate
+from qa_job_scout.core import Vacancy, evaluate, parse_age
 
 PROFILE = {"skills": ["REST API", "Postman"], "evidence": ["x", "y"], "headline": "QA", "location": "Молдова", "name": "Максим"}
 NOW = datetime(2026, 8, 24, tzinfo=UTC)
@@ -57,3 +57,11 @@ def test_date_parser_supports_weeks_and_years():
 
     assert parse_age("1 неделя", NOW) == NOW - __import__("datetime").timedelta(days=7)
     assert parse_age("2 года", NOW) == NOW - __import__("datetime").timedelta(days=730)
+
+
+def test_parse_age_supports_hh_iso_timestamp():
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+    parsed = parse_age("2026-09-04T09:00:00+00:00", now=now)
+    assert parsed == datetime(2026, 9, 4, 9, 0, tzinfo=UTC)

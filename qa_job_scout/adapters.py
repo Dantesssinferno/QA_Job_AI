@@ -8,10 +8,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+import httpx
 from playwright.async_api import BrowserContext, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .core import Vacancy
+from .hh_api import HHApiClient, parse_hh_datetime
 
 
 @dataclass(frozen=True)
@@ -1105,6 +1107,226 @@ class RVCAdapter(BaseAdapter):
         )
 
 
+class HHruAdapter(BaseAdapter):
+    """Collect recent remote QA vacancies through the official HH.ru API."""
+
+    def get_spec(self) -> AdapterSpec:
+        return AdapterSpec(
+            key="hhru",
+            name="HH.ru",
+            url="https://api.hh.ru/vacancies",
+            card_selector="[data-hh-api-vacancy]",
+            link_selector="a[href*='/vacancy/']",
+            title_selectors=("h1", "h2", "h3"),
+            detail_pages=False,
+        )
+
+    @staticmethod
+    def _strip_html(value: str | None) -> str:
+        if not value:
+            return ""
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(value, "html.parser")
+        for node in soup(("script", "style")):
+            node.decompose()
+
+        return "\n".join(
+            line.strip()
+            for line in soup.get_text("\n").splitlines()
+            if line.strip()
+        )
+
+    @staticmethod
+    def _is_remote(item: dict, detail: dict) -> bool:
+        formats = detail.get("work_format") or item.get("work_format") or []
+        if any(
+            isinstance(work_format, dict)
+            and work_format.get("id") == "REMOTE"
+            for work_format in formats
+        ):
+            return True
+
+        snippet = item.get("snippet") or {}
+        haystack = " ".join(
+            str(value or "")
+            for value in (
+                item.get("name"),
+                snippet.get("requirement"),
+                snippet.get("responsibility"),
+                detail.get("description"),
+            )
+        ).lower()
+
+        return any(
+            marker in haystack
+            for marker in (
+                "remote",
+                "удалён",
+                "удален",
+                "из дома",
+                "home office",
+            )
+        )
+
+    @classmethod
+    def _compose_text(cls, item: dict, detail: dict) -> str:
+        parts: list[str] = []
+        snippet = item.get("snippet") or {}
+
+        for value in (
+            detail.get("description"),
+            snippet.get("requirement"),
+            snippet.get("responsibility"),
+        ):
+            cleaned = cls._strip_html(value)
+            if cleaned:
+                parts.append(cleaned)
+
+        skills = detail.get("key_skills") or item.get("key_skills") or []
+        skill_names = [
+            str(skill.get("name")).strip()
+            for skill in skills
+            if isinstance(skill, dict) and skill.get("name")
+        ]
+        if skill_names:
+            parts.append("Ключевые навыки: " + ", ".join(skill_names))
+
+        return "\n\n".join(parts).strip()
+
+    async def collect(
+        self,
+        page: Page,
+        *,
+        context: BrowserContext | None = None,
+        detail_semaphore: asyncio.Semaphore | None = None,
+    ) -> tuple[list[Vacancy], SourceRun]:
+        del page, context
+
+        run = SourceRun(self.spec.key, self.spec.name)
+        api = HHApiClient()
+        queries = tuple(
+            query.strip()
+            for query in os.getenv(
+                "HH_SEARCH_QUERIES",
+                "QA,QA Engineer,Manual QA,QA Tester,Тестировщик,Инженер по тестированию,Функциональный тестировщик",
+            ).split(",")
+            if query.strip()
+        )
+        period_days = max(1, min(int(os.getenv("HH_PERIOD_DAYS", "5")), 30))
+        max_pages = max(1, int(os.getenv("HH_MAX_PAGES", "1")))
+        per_page = max(1, min(int(os.getenv("HH_PER_PAGE", "50")), 100))
+        work_format = os.getenv("HH_WORK_FORMAT", "REMOTE").strip() or None
+
+        async with httpx.AsyncClient(
+            timeout=api.timeout_seconds,
+            follow_redirects=True,
+        ) as http_client:
+            raw_items: list[dict] = []
+            seen_ids: set[str] = set()
+
+            for query in queries:
+                for search_page in range(max_pages):
+                    payload = await api.search_vacancies(
+                        http_client,
+                        text=query,
+                        period_days=period_days,
+                        page=search_page,
+                        per_page=per_page,
+                        work_format=work_format,
+                    )
+                    items = payload.get("items") or []
+                    run.listed += len(items)
+
+                    for item in items:
+                        vacancy_id = str(item.get("id") or "").strip()
+                        if not vacancy_id or vacancy_id in seen_ids:
+                            continue
+                        seen_ids.add(vacancy_id)
+                        raw_items.append(item)
+
+                    pages = int(payload.get("pages") or 0)
+                    if search_page + 1 >= pages or len(raw_items) >= self.max_vacancies:
+                        break
+
+                if len(raw_items) >= self.max_vacancies:
+                    break
+
+            raw_items = raw_items[: self.max_vacancies]
+            semaphore = detail_semaphore or asyncio.Semaphore(6)
+
+            async def load_one(item: dict) -> Vacancy:
+                vacancy_id = str(item["id"])
+                async with semaphore:
+                    detail = await api.get_vacancy(http_client, vacancy_id)
+
+                run.detailed += 1
+                published_raw = str(
+                    detail.get("published_at")
+                    or item.get("published_at")
+                    or ""
+                )
+                published_dt = parse_hh_datetime(published_raw)
+                title = str(detail.get("name") or item.get("name") or "").strip()
+                employer = detail.get("employer") or item.get("employer") or {}
+                area = detail.get("area") or item.get("area") or {}
+                company = str(employer.get("name") or "").strip()
+                location = str(area.get("name") or "").strip()
+                text = self._compose_text(item, detail)
+
+                meta = "\n".join(
+                    value
+                    for value in (
+                        f"Компания: {company}" if company else "",
+                        f"Локация: {location}" if location else "",
+                    )
+                    if value
+                )
+                combined_text = "\n\n".join(
+                    value
+                    for value in (meta, text)
+                    if value
+                ).strip()
+
+                url = str(
+                    detail.get("alternate_url")
+                    or item.get("alternate_url")
+                    or f"https://hh.ru/vacancy/{vacancy_id}"
+                )
+
+                return Vacancy(
+                    source=self.spec.name,
+                    title=title,
+                    url=url,
+                    text=combined_text,
+                    published_text=published_raw,
+                    published_at=(
+                        published_dt.isoformat()
+                        if published_dt
+                        else None
+                    ),
+                    remote=self._is_remote(item, detail),
+                )
+
+            results = await asyncio.gather(
+                *(load_one(item) for item in raw_items),
+                return_exceptions=True,
+            )
+
+            vacancies: list[Vacancy] = []
+            for result in results:
+                if isinstance(result, Exception):
+                    run.errors.append(f"{type(result).__name__}: {result}")
+                    continue
+                vacancies.append(result)
+
+        run.collected = len(vacancies)
+        if not vacancies and run.errors:
+            run.status = "failed"
+
+        return vacancies, run
+
+
 class LinkedInAdapter(BaseAdapter):
     def get_spec(self) -> AdapterSpec:
         return AdapterSpec(
@@ -1149,7 +1371,5 @@ def enabled_adapters() -> tuple[BaseAdapter, ...]:
         GetMatchAdapter(),
         GeekJobAdapter(),
         RVCAdapter(),
-        # LinkedIn пока оставляем в реестре, но его extraction
-        # ограничен только post-URL и не собирает footer/navigation.
-        LinkedInAdapter(),
+        HHruAdapter(),
     )

@@ -63,3 +63,38 @@ git push -u origin main
 - Не откликается на вакансии с неясной датой публикации: они помечаются `needs_review`.
 - Не отправляет формы, сообщения или CV без вашего финального действия.
 - Не храните резюме или ключи в Git; `.gitignore` уже настроен.
+
+## HH.ru API
+
+HH.ru is integrated through the official API, so this source does not use browser scraping. The adapter searches for recent remote QA vacancies, deduplicates them by HH vacancy ID, loads the full vacancy details, strips HTML from `description`, preserves publication timestamps and feeds the normalized `Vacancy` model into the existing deterministic `core.py` filter.
+
+The current API documentation states that HH.ru uses OAuth 2.0, requires `HH-User-Agent`, and exposes `GET /vacancies` for vacancy search plus `GET /vacancies/{vacancy_id}` for detailed vacancy data. It also supports `period` for limiting the publication window, `order_by=publication_time`, and `work_format=REMOTE`.
+
+### HH.ru setup
+
+1. Register an application at `https://dev.hh.ru/admin` and obtain `HH_CLIENT_ID` and `HH_CLIENT_SECRET`, or provide an existing `HH_ACCESS_TOKEN`.
+2. Copy the HH variables from `.env.example` into `.env`.
+3. Set a real contact email in `HH_USER_AGENT`.
+4. Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+5. Run the existing scanner:
+
+```powershell
+python -m qa_job_scout.cli scan
+```
+
+The default HH query set is:
+
+- `QA`
+- `QA Engineer`
+- `Manual QA`
+- `QA Tester`
+- `Тестировщик`
+- `Инженер по тестированию`
+- `Функциональный тестировщик`
+
+The adapter requests only `REMOTE` vacancies from the last 5 days by default and then applies the same project-level QA/Manual/Fullstack/AQA/Automation/English/date rules in `core.py`. Search behavior can be changed with `HH_SEARCH_QUERIES`, `HH_PERIOD_DAYS`, `HH_MAX_PAGES`, `HH_PER_PAGE` and `HH_WORK_FORMAT`.
