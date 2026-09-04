@@ -494,23 +494,6 @@ def parse_age(
 
     clean = " ".join(text.split())
 
-    # HH.ru publishes exact ISO-8601 timestamps such as:
-    # 2026-09-04T09:00:00+03:00
-    # Parse those first because an API adapter should not convert
-    # an exact timestamp into an approximate age phrase.
-    try:
-        iso_match = re.search(
-            r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b",
-            clean,
-        )
-        if iso_match:
-            parsed = datetime.fromisoformat(iso_match.group(0))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            return parsed.astimezone(UTC)
-    except ValueError:
-        pass
-
     for pattern, delta in DATE_PATTERNS:
         match = pattern.search(clean)
 
