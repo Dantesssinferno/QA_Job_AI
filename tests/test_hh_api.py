@@ -6,21 +6,30 @@ import pytest
 from qa_job_scout.hh_api import HHApiAuthError, HHApiCaptchaError, HHApiClient
 
 
-def test_missing_token_is_clear(monkeypatch, tmp_path):
+def test_vacancy_search_does_not_require_oauth_token(monkeypatch, tmp_path):
     monkeypatch.setenv("HH_TOKEN_FILE", str(tmp_path / "missing.json"))
     monkeypatch.setenv("HH_AUTH_MODE", "user")
     api = HHApiClient()
 
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"items": []}
+
+    class FakeClient:
+        async def request(self, *args, **kwargs):
+            return FakeResponse()
+
     async def run():
-        async with httpx.AsyncClient() as client:
-            with pytest.raises(HHApiAuthError, match="HH OAuth token не найден"):
-                await api.search_vacancies(
-                    client,
-                    text="QA Engineer",
-                    period_days=5,
-                    page=0,
-                    per_page=1,
-                )
+        payload = await api.search_vacancies(
+            FakeClient(),
+            text="QA Engineer",
+            period_days=5,
+            page=0,
+            per_page=1,
+        )
+        assert payload == {"items": []}
 
     asyncio.run(run())
 

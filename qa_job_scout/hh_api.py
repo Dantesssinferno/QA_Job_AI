@@ -267,7 +267,7 @@ class HHApiClient:
 
     async def solve_captcha_interactively(self, error: HHApiCaptchaError) -> bool:
         """Open HH's official CAPTCHA page and wait for the user to complete it."""
-        captcha_url = error.captcha_url
+        captcha_url = error.captcha_url or error.fallback_url
         if not captcha_url:
             return False
 
@@ -275,10 +275,10 @@ class HHApiClient:
         if not interactive:
             return False
         backurl = os.getenv("HH_CAPTCHA_BACKURL", "https://hh.ru/").strip() or "https://hh.ru/"
-        url = self.build_captcha_url(captcha_url, backurl=backurl)
+        url = self.build_captcha_url(captcha_url, backurl=backurl) if error.captcha_url else captcha_url
         print()
-        print("[HH.ru] Требуется CAPTCHA.")
-        print("[HH.ru] Открываю официальную страницу CAPTCHA в браузере.")
+        print("[HH.ru] Требуется CAPTCHA / ручная проверка HH.")
+        print("[HH.ru] Открываю страницу HH в браузере.")
         print("[HH.ru] После успешного прохождения CAPTCHA вернитесь в терминал.")
         print(f"[HH.ru] CAPTCHA URL: {url}")
         webbrowser.open(url)
@@ -391,16 +391,22 @@ class HHApiClient:
                             request_id=request_id,
                         )
 
-                    # Current HH deployments may return a generic {type: forbidden}
-                    # for vacancy endpoints instead of the documented captcha_required
-                    # payload. Keep the distinction explicit: this is not an OAuth error.
-                    if path.startswith("/vacancies"):
+                    # Vacancy search/detail are public methods. HH documents 403 for these
+                    # endpoints as CAPTCHA, but some deployments return only {type: forbidden}
+                    # instead of the richer captcha_required payload. Do not misclassify this
+                    # as OAuth failure.
+                    if path == "/vacancies" or path.startswith("/vacancies/"):
                         suffix = f" Request ID: {request_id}." if request_id else ""
+                        fallback_url = None
+                        if path == "/vacancies":
+                            query = {str(k): str(v) for k, v in params if str(k) not in {"host", "locale", "page"}}
+                            fallback_url = "https://hh.ru/search/vacancy?" + urlencode(query)
                         raise HHApiCaptchaError(
-                            "HH VACANCY ACCESS ERROR (403): HH.ru отклонил запрос к вакансиям. "
-                            "Для /vacancies документация HH указывает CAPTCHA как причину 403; "
-                            "в текущем ответе API captcha_url не вернулся, поэтому автоматически открыть CAPTCHA нельзя."
+                            "HH CAPTCHA/ACCESS ERROR (403): HH.ru отклонил публичный запрос к вакансиям. "
+                            "Для GET /vacancies и GET /vacancies/{id} документация HH указывает CAPTCHA как причину 403. "
+                            "HH не вернул captcha_url, поэтому клиент использует страницу HH как fallback."
                             + suffix,
+                            fallback_url=fallback_url,
                             request_id=request_id,
                         )
 
@@ -442,7 +448,10 @@ class HHApiClient:
         work_format: str | None = "REMOTE",
         order_by: str = "publication_time",
     ) -> dict[str, Any]:
-        token = await self._ensure_token(client)
+        # GET /vacancies is a public API method. HH documentation does not require
+        # OAuth for vacancy search; using an applicant OAuth token here can produce
+        # a generic 403 even though /me accepts the token.
+        token = ""
         params: list[tuple[str, str | int]] = [
             ("text", text),
             ("search_field", "name"),
@@ -464,7 +473,8 @@ class HHApiClient:
         client: httpx.AsyncClient,
         vacancy_id: str,
     ) -> dict[str, Any]:
-        token = await self._ensure_token(client)
+        # GET /vacancies/{id} is also a public API method; OAuth is not required.
+        token = ""
         return await self._request_json(
             client,
             "GET",

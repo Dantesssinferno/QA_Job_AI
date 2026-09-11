@@ -66,7 +66,7 @@ git push -u origin main
 
 ## HH.ru API
 
-LinkedIn is not used by the active source registry. HH.ru is collected through the official API with user OAuth2 + PKCE.
+LinkedIn is not used by the active source registry. HH.ru vacancy search and vacancy details are collected through the official public API. OAuth2 + PKCE is kept for user-authorized HH methods and token diagnostics; it is not sent to the public vacancy endpoints.
 
 1. Register the redirect URI `http://localhost:8000/oauth/callback` in the HH.ru application.
 2. Fill `HH_CLIENT_ID`, `HH_CLIENT_SECRET`, and `HH_USER_AGENT` in `.env`.
@@ -79,9 +79,9 @@ The OAuth token is stored locally in `.hh_tokens.json` and must not be committed
 
 The client distinguishes authentication failures from CAPTCHA/access protection.
 
-- Missing token: `HH OAuth token не найден` → run `python -m qa_job_scout hh-auth`.
+- Missing token: this does **not** block `GET /vacancies` or `GET /vacancies/{id}` because those public endpoints do not require OAuth. The token is only required for user-authorized HH methods.
 - Invalid/revoked OAuth token: `HH AUTH ERROR (403)` → the saved token is cleared and re-authorization is required.
 - `captcha_required`: the client uses the `captcha_url` returned by HH, adds the required `backurl`, opens the official HH CAPTCHA page in the browser, waits for manual completion, then retries the API request.
-- Generic `403 {"type":"forbidden"}` from vacancy endpoints: HH may currently omit `captcha_url`. The client reports this explicitly instead of pretending that the OAuth token is invalid; without an official CAPTCHA URL there is no safe way for the client to fabricate or bypass the challenge.
+- Generic `403 {"type":"forbidden"}` from vacancy endpoints: HH may omit `captcha_url`. The client reports this as CAPTCHA/access protection, never as an OAuth failure, and opens the HH vacancy-search page as a fallback for manual verification.
 
 HH's API documentation states that some vacancy operations can return `403` for CAPTCHA and that, when a `captcha_url` is supplied, the application should open that page and retry the analogous API request after the CAPTCHA is completed.
