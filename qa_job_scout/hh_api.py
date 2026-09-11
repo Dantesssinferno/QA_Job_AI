@@ -7,17 +7,39 @@ import json
 import os
 import secrets
 import time
+import webbrowser
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
 
 class HHApiError(RuntimeError):
     """Raised when HH.ru API returns an unrecoverable error."""
+
+
+class HHApiAuthError(HHApiError):
+    """Raised when the HH OAuth authorization is missing or invalid."""
+
+
+class HHApiCaptchaError(HHApiError):
+    """Raised when HH requires a CAPTCHA before continuing an API operation."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        captcha_url: str | None = None,
+        fallback_url: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.captcha_url = captcha_url
+        self.fallback_url = fallback_url
+        self.request_id = request_id
 
 
 @dataclass(frozen=True)
@@ -231,9 +253,37 @@ class HHApiClient:
             return self.access_token
         if self.auth_mode == "auto":
             return await self._request_application_token(client)
-        raise HHApiError(
+        raise HHApiAuthError(
             "HH OAuth token не найден. Сначала выполните `python -m qa_job_scout hh-auth`."
         )
+
+    @staticmethod
+    def build_captcha_url(captcha_url: str, backurl: str = "https://hh.ru/") -> str:
+        """Add the required HH backurl parameter to an API-provided CAPTCHA URL."""
+        parts = urlsplit(captcha_url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query["backurl"] = backurl
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+    async def solve_captcha_interactively(self, error: HHApiCaptchaError) -> bool:
+        """Open HH's official CAPTCHA page and wait for the user to complete it."""
+        captcha_url = error.captcha_url
+        if not captcha_url:
+            return False
+
+        interactive = os.getenv("HH_CAPTCHA_INTERACTIVE", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if not interactive:
+            return False
+        backurl = os.getenv("HH_CAPTCHA_BACKURL", "https://hh.ru/").strip() or "https://hh.ru/"
+        url = self.build_captcha_url(captcha_url, backurl=backurl)
+        print()
+        print("[HH.ru] Требуется CAPTCHA.")
+        print("[HH.ru] Открываю официальную страницу CAPTCHA в браузере.")
+        print("[HH.ru] После успешного прохождения CAPTCHA вернитесь в терминал.")
+        print(f"[HH.ru] CAPTCHA URL: {url}")
+        webbrowser.open(url)
+        await asyncio.to_thread(input, "[HH.ru] Нажмите Enter после прохождения CAPTCHA... ")
+        return True
 
     def _headers(self, token: str | None = None) -> dict[str, str]:
         headers = {
@@ -287,9 +337,78 @@ class HHApiClient:
                     continue
 
                 if response.status_code == 403:
+                    payload: dict[str, Any] = {}
+                    try:
+                        decoded = response.json()
+                        if isinstance(decoded, dict):
+                            payload = decoded
+                    except ValueError:
+                        payload = {}
+
+                    request_id = str(payload.get("request_id") or "").strip() or None
+                    errors = payload.get("errors") or []
+                    first_error = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+                    error_type = str(first_error.get("type") or "").strip()
+                    error_value = str(first_error.get("value") or "").strip()
+
+                    if error_type == "oauth":
+                        if error_value == "token_expired" and not refreshed_after_401 and self.refresh_token:
+                            refreshed_after_401 = True
+                            async with self._token_lock:
+                                await self.refresh_user_token(client)
+                                current_token = self.access_token
+                            continue
+
+                        if error_value in {
+                            "bad_authorization",
+                            "token_revoked",
+                            "application_not_found",
+                            "user_auth_expected",
+                        }:
+                            if error_value in {"bad_authorization", "token_revoked"}:
+                                self.clear_tokens()
+                            details = {
+                                "bad_authorization": "токен недействителен или не существует",
+                                "token_revoked": "токен отозван",
+                                "application_not_found": "приложение HH.ru удалено",
+                                "user_auth_expected": "для этого метода требуется OAuth пользователя",
+                            }.get(error_value, error_value)
+                            suffix = f" Request ID: {request_id}." if request_id else ""
+                            raise HHApiAuthError(
+                                f"HH AUTH ERROR (403): {details}. "
+                                f"Запустите `python -m qa_job_scout hh-auth` и авторизуйтесь заново.{suffix}"
+                            )
+
+                    if error_type == "captcha_required" or error_value == "captcha_required":
+                        captcha_url = str(first_error.get("captcha_url") or "").strip() or None
+                        fallback_url = str(first_error.get("fallback_url") or "").strip() or None
+                        suffix = f" Request ID: {request_id}." if request_id else ""
+                        raise HHApiCaptchaError(
+                            "HH CAPTCHA REQUIRED (403): HH.ru требует пройти CAPTCHA перед продолжением API-запроса."
+                            + suffix,
+                            captcha_url=captcha_url,
+                            fallback_url=fallback_url,
+                            request_id=request_id,
+                        )
+
+                    # Current HH deployments may return a generic {type: forbidden}
+                    # for vacancy endpoints instead of the documented captcha_required
+                    # payload. Keep the distinction explicit: this is not an OAuth error.
+                    if path.startswith("/vacancies"):
+                        suffix = f" Request ID: {request_id}." if request_id else ""
+                        raise HHApiCaptchaError(
+                            "HH VACANCY ACCESS ERROR (403): HH.ru отклонил запрос к вакансиям. "
+                            "Для /vacancies документация HH указывает CAPTCHA как причину 403; "
+                            "в текущем ответе API captcha_url не вернулся, поэтому автоматически открыть CAPTCHA нельзя."
+                            + suffix,
+                            request_id=request_id,
+                        )
+
+                    body = response.text[:700].strip()
+                    suffix = f" Request ID: {request_id}." if request_id else ""
                     raise HHApiError(
-                        "HH API вернул 403 Forbidden. Проверьте OAuth-доступ приложения, "
-                        "User-Agent и настройки приложения HH.ru."
+                        f"HH API ACCESS ERROR (403) для {path}: доступ запрещён. "
+                        f"Это не похоже на отсутствие OAuth-токена.{suffix} Ответ: {body}"
                     )
 
                 if response.status_code >= 400:

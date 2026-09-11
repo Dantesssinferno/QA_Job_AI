@@ -1198,7 +1198,7 @@ class HHApiAdapter(BaseAdapter):
         context: BrowserContext | None = None,
         detail_semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[list[Vacancy], SourceRun]:
-        from .hh_api import HHApiClient, HHApiError
+        from .hh_api import HHApiCaptchaError, HHApiClient, HHApiError
         import httpx
 
         run = SourceRun(self.spec.key, self.spec.name)
@@ -1214,15 +1214,30 @@ class HHApiAdapter(BaseAdapter):
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
+                captcha_retry_used = False
                 for query in self.search_texts:
-                    payload = await api.search_vacancies(
-                        client,
-                        text=query,
-                        period_days=self.period_days,
-                        page=0,
-                        per_page=self.per_page,
-                        work_format="REMOTE",
-                    )
+                    try:
+                        payload = await api.search_vacancies(
+                            client,
+                            text=query,
+                            period_days=self.period_days,
+                            page=0,
+                            per_page=self.per_page,
+                            work_format="REMOTE",
+                        )
+                    except HHApiCaptchaError as exc:
+                        if not captcha_retry_used and await api.solve_captcha_interactively(exc):
+                            captcha_retry_used = True
+                            payload = await api.search_vacancies(
+                                client,
+                                text=query,
+                                period_days=self.period_days,
+                                page=0,
+                                per_page=self.per_page,
+                                work_format="REMOTE",
+                            )
+                        else:
+                            raise
                     for item in payload.get("items", []) or []:
                         if not isinstance(item, dict):
                             continue

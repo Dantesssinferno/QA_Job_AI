@@ -74,3 +74,14 @@ LinkedIn is not used by the active source registry. HH.ru is collected through t
 4. Run `python -m qa_job_scout scan`.
 
 The OAuth token is stored locally in `.hh_tokens.json` and must not be committed to Git.
+
+### HH API errors and CAPTCHA
+
+The client distinguishes authentication failures from CAPTCHA/access protection.
+
+- Missing token: `HH OAuth token не найден` → run `python -m qa_job_scout hh-auth`.
+- Invalid/revoked OAuth token: `HH AUTH ERROR (403)` → the saved token is cleared and re-authorization is required.
+- `captcha_required`: the client uses the `captcha_url` returned by HH, adds the required `backurl`, opens the official HH CAPTCHA page in the browser, waits for manual completion, then retries the API request.
+- Generic `403 {"type":"forbidden"}` from vacancy endpoints: HH may currently omit `captcha_url`. The client reports this explicitly instead of pretending that the OAuth token is invalid; without an official CAPTCHA URL there is no safe way for the client to fabricate or bypass the challenge.
+
+HH's API documentation states that some vacancy operations can return `403` for CAPTCHA and that, when a `captcha_url` is supplied, the application should open that page and retry the analogous API request after the CAPTCHA is completed.
