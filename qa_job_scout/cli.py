@@ -2,12 +2,130 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import secrets
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .core import evaluate, load_profile
 from .storage import Store
+
+
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    result: dict[str, str] = {}
+    expected_path = "/oauth/callback"
+
+    def do_GET(self):  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path != self.expected_path:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        query = parse_qs(parsed.query)
+        for key in ("code", "state", "error", "error_description"):
+            values = query.get(key)
+            if values:
+                self.result[key] = values[0]
+
+        body = "<html><body><h2>HH.ru авторизация получена.</h2><p>Можно вернуться в терминал.</p></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def log_message(self, format, *args):  # noqa: A002
+        return
+
+
+def hh_auth() -> None:
+    from .hh_api import HHApiClient, HHApiError, create_pkce_pair
+    import httpx
+
+    api = HHApiClient()
+    if not api.client_id or not api.client_secret:
+        raise SystemExit("Заполните HH_CLIENT_ID и HH_CLIENT_SECRET в .env")
+
+    parsed_redirect = urlparse(api.redirect_uri)
+    if parsed_redirect.scheme != "http" or parsed_redirect.hostname not in {"localhost", "127.0.0.1"}:
+        raise SystemExit(
+            "Для локальной hh-auth сейчас поддерживается redirect URI на localhost/127.0.0.1."
+        )
+    if parsed_redirect.port not in {None, 80, 8000}:
+        raise SystemExit("Запустите hh-auth с redirect URI на порту 8000, как зарегистрировано в HH.ru.")
+
+    host = parsed_redirect.hostname
+    port = parsed_redirect.port or 80
+    handler = _OAuthCallbackHandler
+    handler.result = {}
+    handler.expected_path = parsed_redirect.path or "/oauth/callback"
+    server = HTTPServer((host, port), handler)
+
+    state = secrets.token_urlsafe(32)
+    pkce = create_pkce_pair()
+    force_login = os.getenv("HH_FORCE_LOGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+    authorization_url = api.build_authorization_url(
+        state=state,
+        code_challenge=pkce.challenge,
+        force_login=force_login,
+    )
+
+    print("Открываю HH.ru для авторизации...")
+    print(f"Callback: {api.redirect_uri}")
+    print("Если браузер не открылся, скопируйте URL ниже:")
+    print(authorization_url)
+    print()
+
+    threading.Thread(target=server.handle_request, daemon=True).start()
+    webbrowser.open(authorization_url)
+
+    try:
+        for _ in range(300):
+            if handler.result:
+                break
+            import time
+            time.sleep(0.2)
+    finally:
+        server.server_close()
+
+    if not handler.result:
+        raise SystemExit("Не получен callback от HH.ru за 60 секунд.")
+
+    if handler.result.get("error"):
+        raise SystemExit(
+            f"HH OAuth отменён/завершился ошибкой: {handler.result.get('error_description') or handler.result['error']}"
+        )
+    if handler.result.get("state") != state:
+        raise SystemExit("Ошибка OAuth: state не совпадает.")
+    code = handler.result.get("code")
+    if not code:
+        raise SystemExit("HH callback не содержит authorization code.")
+
+    async def exchange():
+        timeout = httpx.Timeout(api.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await api.exchange_code(
+                client,
+                code=code,
+                code_verifier=pkce.verifier,
+            )
+
+    try:
+        payload = asyncio.run(exchange())
+    except HHApiError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    expires = payload.get("expires_in")
+    print(f"HH.ru OAuth успешно завершён. Токен сохранён в: {api.token_file}")
+    if expires:
+        print(f"Access token expires_in: {expires} seconds")
 
 
 def write_report(store: Store) -> Path:
@@ -239,6 +357,11 @@ def main() -> None:
     )
 
     sub.add_parser(
+        "hh-auth",
+        help="авторизовать приложение в HH.ru через OAuth2 + PKCE",
+    )
+
+    sub.add_parser(
         "scan",
         help="собрать, отфильтровать и подготовить черновики",
     )
@@ -275,6 +398,10 @@ def main() -> None:
     args = parser.parse_args()
 
     store = Store()
+
+    if args.command == "hh-auth":
+        hh_auth()
+        return
 
     if args.command == "scan":
         from .ai import enrich

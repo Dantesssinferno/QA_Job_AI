@@ -63,3 +63,14 @@ git push -u origin main
 - Не откликается на вакансии с неясной датой публикации: они помечаются `needs_review`.
 - Не отправляет формы, сообщения или CV без вашего финального действия.
 - Не храните резюме или ключи в Git; `.gitignore` уже настроен.
+
+## HH.ru API
+
+LinkedIn is not used by the active source registry. HH.ru is collected through the official API with user OAuth2 + PKCE.
+
+1. Register the redirect URI `http://localhost:8000/oauth/callback` in the HH.ru application.
+2. Fill `HH_CLIENT_ID`, `HH_CLIENT_SECRET`, and `HH_USER_AGENT` in `.env`.
+3. Run `python -m qa_job_scout hh-auth` once and authorize the application in HH.ru.
+4. Run `python -m qa_job_scout scan`.
+
+The OAuth token is stored locally in `.hh_tokens.json` and must not be committed to Git.

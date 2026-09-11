@@ -5,4 +5,5 @@ __pycache__/
 .env
 test-results.xml
 coverage.xml
+htmlcov/.hh_tokens.json
 htmlcov/

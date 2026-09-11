@@ -1105,6 +1105,187 @@ class RVCAdapter(BaseAdapter):
         )
 
 
+class HHApiAdapter(BaseAdapter):
+    """Collect vacancies from the official HH.ru API instead of scraping HTML."""
+
+    def get_spec(self) -> AdapterSpec:
+        return AdapterSpec(
+            key="hh",
+            name="HH.ru API",
+            url="https://hh.ru/search/vacancy",
+            card_selector="",
+            link_selector="",
+            title_selectors=(),
+            detail_pages=False,
+        )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.search_texts = tuple(
+            item.strip()
+            for item in os.getenv(
+                "HH_SEARCH_TEXTS",
+                "QA Engineer,Manual QA,QA,Тестировщик",
+            ).split(",")
+            if item.strip()
+        )
+        self.period_days = max(1, min(int(os.getenv("HH_PERIOD_DAYS", "5")), 30))
+        self.per_page = max(1, min(int(os.getenv("HH_PER_PAGE", "50")), 100))
+        self.hh_max_vacancies = max(1, int(os.getenv("HH_MAX_VACANCIES", "50")))
+        self.detail_concurrency = max(1, int(os.getenv("HH_DETAIL_CONCURRENCY", "6")))
+
+    @staticmethod
+    def _strip_html(value: str) -> str:
+        if not value:
+            return ""
+        try:
+            from bs4 import BeautifulSoup
+            return BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+        except Exception:  # noqa: BLE001
+            return re.sub(r"<[^>]+>", " ", value).strip()
+
+    def _vacancy_from_detail(self, detail: dict[str, object]) -> Vacancy:
+        title = str(detail.get("name") or "Без названия").strip()
+        url = str(detail.get("alternate_url") or detail.get("url") or "").strip()
+        description = self._strip_html(str(detail.get("description") or ""))
+
+        employer = detail.get("employer") or {}
+        if isinstance(employer, dict):
+            employer_name = str(employer.get("name") or "").strip()
+        else:
+            employer_name = ""
+
+        experience = detail.get("experience") or {}
+        schedule = detail.get("schedule") or {}
+        employment = detail.get("employment") or {}
+        salary = detail.get("salary") or {}
+
+        meta = []
+        if employer_name:
+            meta.append(f"Компания: {employer_name}")
+        if isinstance(experience, dict) and experience.get("name"):
+            meta.append(f"Опыт: {experience['name']}")
+        if isinstance(schedule, dict) and schedule.get("name"):
+            meta.append(f"График: {schedule['name']}")
+        if isinstance(employment, dict) and employment.get("name"):
+            meta.append(f"Занятость: {employment['name']}")
+        if isinstance(salary, dict):
+            currency = str(salary.get("currency") or "")
+            salary_from = salary.get("from")
+            salary_to = salary.get("to")
+            if salary_from or salary_to:
+                meta.append(f"Зарплата: {salary_from or ''}-{salary_to or ''} {currency}".strip())
+
+        text = "\n".join(meta + [description]).strip()
+        published_at = str(detail.get("published_at") or "").strip()
+        from .hh_api import parse_hh_datetime
+        parsed = parse_hh_datetime(published_at)
+
+        return Vacancy(
+            source="HH.ru API",
+            title=title,
+            url=url,
+            text=text,
+            published_text=published_at,
+            published_at=parsed.isoformat() if parsed else None,
+            remote=True,
+        )
+
+    async def collect(
+        self,
+        page: Page,
+        *,
+        context: BrowserContext | None = None,
+        detail_semaphore: asyncio.Semaphore | None = None,
+    ) -> tuple[list[Vacancy], SourceRun]:
+        from .hh_api import HHApiClient, HHApiError
+        import httpx
+
+        run = SourceRun(self.spec.key, self.spec.name)
+        if not self.search_texts:
+            run.status = "failed"
+            run.errors.append("HH_SEARCH_TEXTS пуст.")
+            return [], run
+
+        api = HHApiClient()
+        timeout = httpx.Timeout(api.timeout_seconds)
+        seen: set[str] = set()
+        items: list[dict[str, object]] = []
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for query in self.search_texts:
+                    payload = await api.search_vacancies(
+                        client,
+                        text=query,
+                        period_days=self.period_days,
+                        page=0,
+                        per_page=self.per_page,
+                        work_format="REMOTE",
+                    )
+                    for item in payload.get("items", []) or []:
+                        if not isinstance(item, dict):
+                            continue
+                        vacancy_id = str(item.get("id") or "").strip()
+                        if not vacancy_id or vacancy_id in seen:
+                            continue
+                        seen.add(vacancy_id)
+                        items.append(item)
+                        if len(items) >= self.hh_max_vacancies:
+                            break
+                    if len(items) >= self.hh_max_vacancies:
+                        break
+
+                run.listed = len(items)
+                if not items:
+                    run.status = "failed"
+                    run.errors.append("HH API не вернул вакансий по заданным поисковым запросам.")
+                    return [], run
+
+                semaphore = asyncio.Semaphore(self.detail_concurrency)
+
+                async def fetch_detail(item: dict[str, object]):
+                    vacancy_id = str(item.get("id") or "")
+                    async with semaphore:
+                        return await api.get_vacancy(client, vacancy_id)
+
+                results = await asyncio.gather(
+                    *(fetch_detail(item) for item in items),
+                    return_exceptions=True,
+                )
+
+                vacancies: list[Vacancy] = []
+                for item, result in zip(items, results):
+                    if isinstance(result, Exception):
+                        run.errors.append(
+                            f"{item.get('id')}: {type(result).__name__}: {result}"
+                        )
+                        continue
+                    try:
+                        vacancies.append(self._vacancy_from_detail(result))
+                        run.detailed += 1
+                    except Exception as exc:  # noqa: BLE001
+                        run.errors.append(
+                            f"{item.get('id')}: {type(exc).__name__}: {exc}"
+                        )
+
+        except HHApiError as exc:
+            run.errors.append(str(exc))
+            run.status = "failed"
+            return [], run
+        except Exception as exc:  # noqa: BLE001
+            run.errors.append(f"{type(exc).__name__}: {exc}")
+            run.status = "failed"
+            return [], run
+
+        run.collected = len(vacancies)
+        if run.errors and vacancies:
+            run.status = "partial"
+        elif run.errors:
+            run.status = "failed"
+        return vacancies, run
+
+
 class LinkedInAdapter(BaseAdapter):
     def get_spec(self) -> AdapterSpec:
         return AdapterSpec(
@@ -1149,7 +1330,5 @@ def enabled_adapters() -> tuple[BaseAdapter, ...]:
         GetMatchAdapter(),
         GeekJobAdapter(),
         RVCAdapter(),
-        # LinkedIn пока оставляем в реестре, но его extraction
-        # ограничен только post-URL и не собирает footer/navigation.
-        LinkedInAdapter(),
+        HHApiAdapter(),
     )

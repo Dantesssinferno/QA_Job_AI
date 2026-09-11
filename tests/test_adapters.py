@@ -14,10 +14,11 @@ def test_every_enabled_source_has_a_dedicated_adapter_and_selectors():
         "getmatch",
         "geekjob",
         "rvc",
-        "linkedin",
+        "hh",
     }
     assert all(
-        adapter.spec.card_selector and adapter.spec.link_selector
+        (adapter.spec.card_selector and adapter.spec.link_selector)
+        or adapter.spec.key == "hh"
         for adapter in adapters
     )
 
