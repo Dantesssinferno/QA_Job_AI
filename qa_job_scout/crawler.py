@@ -24,7 +24,7 @@ async def _block_heavy_resources(route) -> None:
         await route.continue_()
 
 
-async def crawl() -> CrawlResult:
+async def crawl(source_keys: set[str] | None = None) -> CrawlResult:
     """Collect sources in parallel using a headless persistent browser context."""
     headless = os.getenv("HEADLESS", "true").strip().lower() in {"1", "true", "yes", "on"}
     source_concurrency = max(1, int(os.getenv("SOURCE_CONCURRENCY", "6")))
@@ -57,7 +57,16 @@ async def crawl() -> CrawlResult:
                 finally:
                     await page.close()
 
-        adapters = enabled_adapters()
+        adapters = tuple(
+            adapter
+            for adapter in enabled_adapters()
+            if source_keys is None or adapter.spec.key in source_keys
+        )
+        if not adapters:
+            raise ValueError(
+                "Не найдено включённых источников для указанных ключей: "
+                + ", ".join(sorted(source_keys or set()))
+            )
         results = await asyncio.gather(
             *(run_adapter(adapter) for adapter in adapters),
             return_exceptions=True,
@@ -78,5 +87,5 @@ async def crawl() -> CrawlResult:
     return CrawlResult(all_vacancies, runs)
 
 
-def crawl_sync() -> CrawlResult:
-    return asyncio.run(crawl())
+def crawl_sync(source_keys: set[str] | None = None) -> CrawlResult:
+    return asyncio.run(crawl(source_keys))

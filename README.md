@@ -1,87 +1,700 @@
 # QA Job Scout
 
-Локальный AI-агент для поиска удалённых QA-вакансий, опубликованных не более пяти дней назад. Он собирает объявления, отсеивает неподходящие условия, сопоставляет требования с профилем кандидата и готовит честные сопроводительные письма.
+Локальный AI-агент для поиска и предварительного отбора QA-вакансий. Проект собирает вакансии с подключённых площадок, нормализует данные, применяет детерминированные правила под профиль кандидата, при необходимости использует OpenAI для дополнительного анализа и готовит Markdown-отчёт и черновики сопроводительных писем.
 
-## Что он делает
+Проект **не отправляет отклики автоматически**. Финальный просмотр вакансии, прикрепление CV и отправка отклика выполняются пользователем вручную.
 
-- Открывает сайты вакансий через Playwright (так лучше работают JavaScript-сайты и сохранённые сессии).
-- Учитывает только QA Engineer / Manual QA / Тестировщик / QA/QC вакансии, remote и возраст до 5 дней.
-- Исключает вакансии, где английский или automation явно обязательны.
-- Дедуплицирует результаты в SQLite, оценивает соответствие и создаёт отчёт в `out/report.md`.
-- Для подходящих вакансий пишет черновики писем на русском (или на языке вакансии) по фактам из `candidate_profile.json`.
+---
 
-Агент **не отправляет отклики самостоятельно**. Отклик - существенное внешнее действие, а многие перечисленные сайты требуют личную авторизованную сессию и/или CAPTCHA. Команда `review` открывает конкретную вакансию и печатает письмо: пользователь проверяет текст, прикладывает CV и сам нажимает финальную кнопку отправки.
+## 1. Что умеет проект
 
-## Установка и запуск
+### Сбор вакансий
 
-Требуется Python 3.11+.
+Активные источники:
+
+| Ключ | Источник | Способ сбора |
+|---|---|---|
+| `hirehi` | HireHi | Playwright |
+| `rockethunt` | RocketHunt | Playwright |
+| `dreamjob` | DreamJob | Playwright |
+| `hirify` | Hirify | Playwright |
+| `taylor` | Taylor | Playwright |
+| `jobrocket` | JobRocket | Playwright |
+| `talanto` | Talanto | Playwright |
+| `getmatch` | GetMatch | Playwright |
+| `geekjob` | GeekJob | Playwright |
+| `rvc` | RVC | Playwright |
+| `hh` | HH.ru | официальный HH API |
+
+LinkedIn-адаптер сохранён в коде для совместимости/развития, но **не входит в `enabled_adapters()` и текущим `scan` не запускается**.
+
+### Обработка вакансий
+
+Для каждой вакансии проект:
+
+1. извлекает название, URL, описание и дату;
+2. нормализует текст;
+3. определяет, относится ли вакансия к QA;
+4. проверяет удалённый формат;
+5. анализирует обязательность английского языка;
+6. анализирует обязательность automation;
+7. учитывает возраст вакансии;
+8. оценивает соответствие профилю кандидата;
+9. сохраняет вакансию и её статус в SQLite;
+10. для подходящих вакансий создаёт сопроводительное письмо.
+
+Основные статусы:
+
+- `recommended` — вакансия прошла детерминированные фильтры;
+- `needs_review` — есть неоднозначность, требующая проверки;
+- `rejected` — вакансия не соответствует заданным условиям.
+
+AI используется только после детерминированных проверок для вакансий, которые прошли основной фильтр. Если `OPENAI_API_KEY` не задан, используется локальная эвристика и шаблон письма.
+
+---
+
+## 2. Требования
+
+- Windows / Linux / macOS;
+- Python **3.11+**;
+- доступ в интернет для сайтов вакансий и HH API;
+- Chromium для Playwright.
+
+Для разработки дополнительно используются `pytest`, `pytest-cov`, `pytest-html` и `ruff`.
+
+---
+
+## 3. Установка с нуля
+
+Открыть терминал в корне проекта.
+
+### Windows PowerShell
 
 ```powershell
-py -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 playwright install chromium
 Copy-Item .env.example .env
+```
+
+### Linux/macOS
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+playwright install chromium
+cp .env.example .env
+```
+
+После установки проект запускается из корня репозитория:
+
+```text
+QA_Job_AI/
+├── .env
+├── candidate_profile.json
+├── pyproject.toml
+├── requirements.txt
+├── requirements-dev.txt
+├── qa_job_scout/
+└── tests/
+```
+
+---
+
+## 4. Конфигурация `.env`
+
+Файл `.env` создаётся из `.env.example` и **не должен попадать в Git**.
+
+### Общие настройки
+
+```dotenv
+HEADLESS=false
+SOURCE_CONCURRENCY=6
+DETAIL_CONCURRENCY=12
+PAGE_TIMEOUT_MS=20000
+SELECTOR_TIMEOUT_MS=7000
+DETAIL_RETRIES=3
+```
+
+- `HEADLESS=false` — удобно для первого запуска и отладки;
+- `HEADLESS=true` — запуск браузера без интерфейса;
+- `SOURCE_CONCURRENCY` — сколько источников обрабатывать параллельно;
+- `DETAIL_CONCURRENCY` — параллелизм при открытии страниц вакансий;
+- `PAGE_TIMEOUT_MS` / `SELECTOR_TIMEOUT_MS` — таймауты Playwright.
+
+### OpenAI
+
+```dotenv
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+`OPENAI_API_KEY` необязателен.
+
+Без него проект работает локально без AI API. С ключом OpenAI дополнительно формирует оценку/письмо в предусмотренном pipeline.
+
+---
+
+## 5. Профиль кандидата
+
+Файл:
+
+```text
+candidate_profile.json
+```
+
+В нём хранятся:
+
+- имя и контакты;
+- целевые роли;
+- профессиональное summary;
+- навыки;
+- automation-навыки;
+- подтверждённый опыт;
+- опыт по компаниям/проектам;
+- ограничения (`hard_no`);
+- язык сопроводительных писем.
+
+**Это источник фактов для оценки и писем.** Проект не должен придумывать отсутствующий опыт.
+
+Если меняется резюме или целевая позиция, сначала обновляется `candidate_profile.json`.
+
+---
+
+# 6. Основные команды
+
+## Полный скан всех источников
+
+```powershell
 python -m qa_job_scout scan
+```
+
+Это основной рабочий сценарий. Он запускает все адаптеры из `enabled_adapters()` одновременно с ограничением `SOURCE_CONCURRENCY`.
+
+В конце выводится статистика отдельно по каждому источнику и общий результат.
+
+---
+
+## Скан только одного источника
+
+Поддерживается выбор источников через `--sources`.
+
+### Только HH.ru
+
+```powershell
+python -m qa_job_scout scan --sources hh
+```
+
+### Только HireHi
+
+```powershell
+python -m qa_job_scout scan --sources hirehi
+```
+
+### Несколько конкретных источников
+
+```powershell
+python -m qa_job_scout scan --sources hh hirehi rockethunt
+```
+
+Без `--sources` сканируются **все включённые источники**.
+
+Доступные ключи:
+
+```text
+hirehi
+rockethunt
+dreamjob
+hirify
+taylor
+jobrocket
+talanto
+getmatch
+geekjob
+rvc
+hh
+```
+
+Если передан неизвестный ключ, сканирование завершается с понятной ошибкой вместо молчаливого пропуска.
+
+---
+
+## Пересоздать отчёт из SQLite
+
+```powershell
 python -m qa_job_scout report
+```
+
+Команда не сканирует сайты. Она использует уже сохранённые данные из `qa_jobs.sqlite3` и создаёт/обновляет:
+
+```text
+out/report.md
+```
+
+---
+
+## Открыть вакансию для ручной проверки
+
+```powershell
 python -m qa_job_scout review <vacancy-id>
 ```
 
-`OPENAI_API_KEY` в `.env` необязателен. Без него агент использует прозрачную эвристику сопоставления и шаблон письма; с ключом - улучшает оценку и письмо через OpenAI API. Ключ никогда не пишется в отчёт или базу.
-
-## VS Code и GitHub
-
-Откройте именно папку проекта: `code "C:\Users\Maxim Starostenco\QA_Job_AI"`. Файл `qa_jobs.sqlite3` появляется после первой команды `report` или `scan`; в VS Code откройте его расширением **SQLite Viewer** (проект предлагает его автоматически). Таблица `vacancies` содержит результаты, статусы, score и полный JSON вакансии.
-
-Результаты работы (`qa_jobs.sqlite3`, `out/`, `.browser-profile/`) исключены из Git, поэтому в GitHub попадёт только код и безопасный пример настроек. Для первой фиксации локально:
+Например:
 
 ```powershell
-git add .
-git commit -m "Initial QA job scout"
+python -m qa_job_scout review 136592381
 ```
 
-После создания пустого репозитория на GitHub добавьте его адрес и выполните:
+Playwright открывает страницу вакансии в браузере. Пользователь сам проверяет вакансию, прикладывает CV и отправляет отклик.
+
+---
+
+## Отклонить вакансию вручную
 
 ```powershell
-git remote add origin https://github.com/<ваш-логин>/qa-job-scout.git
-git push -u origin main
+python -m qa_job_scout reject <vacancy-id> "Причина"
 ```
 
-Чтобы сайты с личным кабинетом были доступны, один раз запустите браузер с `HEADLESS=false`, войдите вручную и закройте его. Playwright сохраняет cookies в `.browser-profile/`, который игнорируется Git.
+Например:
 
-## Источники
+```powershell
+python -m qa_job_scout reject 136592381 "Не подходит уровень позиции"
+```
 
-В `qa_job_scout/adapters.py` есть отдельный адаптер для каждого источника: HireHi, RocketHunt, DreamJob, Hirify, Taylor, JobRocket, Talanto, GetMatch, GeekJob, RVC и LinkedIn. Каждый адаптер ждёт селектор карточки, выбирает ссылку вакансии, открывает её страницу и извлекает заголовок, требования и дату. LinkedIn требует авторизованную сессию; `hh.ru/applicant/negotiations` не сканируется, потому что это личная страница, а не поиск вакансий.
+Решение сохраняется в таблице `manual_decisions` и учитывается при последующих сохранениях.
 
-После каждого `scan` таблица `source_runs` в `qa_jobs.sqlite3` содержит проверяемый журнал: число найденных карточек, открытых страниц, сохранённых вакансий, результаты фильтрации и ошибки конкретной площадки. Таблица `vacancies` сохраняет все собранные вакансии, включая `rejected` и `needs_review`; в `out/report.md` выводятся только рекомендованные вакансии, каждая со ссылкой и сопроводительным письмом.
+---
 
-Из-за защиты от ботов DOM разных сайтов меняется. Для каждого источника сохраните селектор карточки вакансии в переменной `SOURCE_*_CARD` из `.env`, если универсальный поиск ссылок не нашёл карточки. Сборщик не обходит CAPTCHA и соблюдает задержку между сайтами.
+# 7. HH.ru: официальная API-интеграция
 
-## Безопасность и качество
+HH.ru подключён отдельным API-адаптером и **не парсится через HTML для получения вакансий**.
 
-- Не подделывает опыт, уровень английского или навыки автоматизации.
-- Не откликается на вакансии с неясной датой публикации: они помечаются `needs_review`.
-- Не отправляет формы, сообщения или CV без вашего финального действия.
-- Не храните резюме или ключи в Git; `.gitignore` уже настроен.
+Используются официальные endpoints HH API для поиска и получения деталей вакансии.
 
-## HH.ru API
+## Рекомендуемая авторизация вакансий
 
-LinkedIn is not used by the active source registry. HH.ru vacancy search and vacancy details are collected through the official public API. OAuth2 + PKCE is kept for user-authorized HH methods and token diagnostics; it is not sent to the public vacancy endpoints.
+Для текущего сборщика используется application access token:
 
-1. Register the redirect URI `http://localhost:8000/oauth/callback` in the HH.ru application.
-2. Fill `HH_CLIENT_ID`, `HH_CLIENT_SECRET`, and `HH_USER_AGENT` in `.env`.
-3. Run `python -m qa_job_scout hh-auth` once and authorize the application in HH.ru.
-4. Run `python -m qa_job_scout scan`.
+```dotenv
+HH_VACANCY_AUTH_MODE=application
+HH_APPLICATION_TOKEN=
+HH_APPLICATION_TOKEN_FILE=.hh_app_token.json
+```
 
-The OAuth token is stored locally in `.hh_tokens.json` and must not be committed to Git.
+Application token не нужно получать перед каждым запросом. Если токен хранится в `.hh_app_token.json`, клиент использует его повторно.
 
-### HH API errors and CAPTCHA
+**Не коммитьте `.hh_app_token.json` и `.env`.**
 
-The client distinguishes authentication failures from CAPTCHA/access protection.
+---
 
-- Missing token: this does **not** block `GET /vacancies` or `GET /vacancies/{id}` because those public endpoints do not require OAuth. The token is only required for user-authorized HH methods.
-- Invalid/revoked OAuth token: `HH AUTH ERROR (403)` → the saved token is cleared and re-authorization is required.
-- `captcha_required`: the client uses the `captcha_url` returned by HH, adds the required `backurl`, opens the official HH CAPTCHA page in the browser, waits for manual completion, then retries the API request.
-- Generic `403 {"type":"forbidden"}` from vacancy endpoints: HH may omit `captcha_url`. The client reports this as CAPTCHA/access protection, never as an OAuth failure, and opens the HH vacancy-search page as a fallback for manual verification.
+## 8. Настройка HH.ru
 
-HH's API documentation states that some vacancy operations can return `403` for CAPTCHA and that, when a `captcha_url` is supplied, the application should open that page and retry the analogous API request after the CAPTCHA is completed.
+В `.env` задаются параметры приложения HH:
+
+```dotenv
+HH_CLIENT_ID=
+HH_CLIENT_SECRET=
+HH_REDIRECT_URI=http://localhost:8000/oauth/callback
+HH_USER_AGENT=QA_Job_AI/0.2 (contact: your-email@example.com)
+HH_HOST=hh.ru
+HH_LOCALE=RU
+```
+
+### User OAuth / PKCE
+
+Для пользовательской OAuth-авторизации существует команда:
+
+```powershell
+python -m qa_job_scout hh-auth
+```
+
+Она запускает локальный callback на `localhost`, открывает HH.ru, получает authorization code и сохраняет user access/refresh token в:
+
+```text
+.hh_tokens.json
+```
+
+Файл не коммитится.
+
+User OAuth нужен для пользовательских HH API-операций и диагностики. Для текущего сбора вакансий рекомендуется `HH_VACANCY_AUTH_MODE=application`.
+
+---
+
+# 9. HH.ru: поиск до 1000 вакансий за один `scan`
+
+Для HH API настроены:
+
+```dotenv
+HH_SEARCH_TEXTS=QA Engineer,Manual QA,QA,Тестировщик
+HH_PERIOD_DAYS=5
+HH_PER_PAGE=100
+HH_MAX_VACANCIES=1000
+HH_DETAIL_CONCURRENCY=10
+HH_API_TIMEOUT_SECONDS=30
+HH_API_RETRIES=3
+```
+
+HH API отдаёт результаты страницами. Клиент автоматически выполняет пагинацию.
+
+При запуске:
+
+```powershell
+python -m qa_job_scout scan --sources hh
+```
+
+логика выглядит так:
+
+```text
+страница 1 → до 100 вакансий
+страница 2 → до 100
+страница 3 → до 100
+...
+страница 10 → до 100
+                 ↓
+           максимум 1000
+```
+
+`HH_MAX_VACANCIES=1000` — верхний предел, а не гарантия, что HH всегда вернёт ровно 1000 уникальных вакансий. Если по поисковым запросам и периоду доступно меньше, будет собрано меньше.
+
+После получения карточек клиент запрашивает детали каждой вакансии через `GET /vacancies/{id}`. Поэтому при 1000 результатах это может быть до 1000 detail-запросов.
+
+---
+
+# 10. Дата публикации HH-вакансии
+
+HH API предоставляет точное поле:
+
+```text
+published_at
+```
+
+Адаптер HH сохраняет его в `Vacancy.published_at` и также сохраняет исходное значение в `published_text`.
+
+Например:
+
+```text
+published_at = 2026-09-12T09:36:19+00:00
+```
+
+Если точная API-дата есть, pipeline не пытается повторно распознавать её как текстовую относительную дату.
+
+Для HTML-источников используется обычный механизм извлечения даты из `time`, `[datetime]` и текста страницы/карточки.
+
+---
+
+# 11. CAPTCHA и ошибки HH
+
+Клиент различает несколько классов ошибок:
+
+- OAuth authentication error;
+- API access/forbidden error;
+- CAPTCHA required;
+- ошибки application token;
+- сетевые/HTTP ошибки.
+
+Если HH возвращает настоящий `captcha_url`, клиент может открыть официальную CAPTCHA-страницу и дождаться ручного решения.
+
+Клиент **не придумывает CAPTCHA URL** по обычному `403` и не маскирует произвольный `403` под OAuth.
+
+---
+
+# 12. Остальные сайты
+
+Все HTML-источники используют Playwright и отдельные адаптеры в:
+
+```text
+qa_job_scout/adapters.py
+```
+
+У каждого адаптера есть `AdapterSpec`, содержащий URL, селекторы карточек/деталей, правила извлечения даты и дополнительные параметры.
+
+Большинство источников используют общую логику `BaseAdapter`:
+
+```text
+страница поиска
+      ↓
+карточки вакансий
+      ↓
+ссылки
+      ↓
+страница вакансии
+      ↓
+title / text / date
+      ↓
+Vacancy
+```
+
+Если сайт поменял DOM, конкретный адаптер можно обновить независимо от остальных.
+
+Для источников, где нужен логин, Playwright использует persistent browser profile:
+
+```text
+.browser-profile/
+```
+
+Эта директория локальная и исключена из Git.
+
+---
+
+# 13. Browser profile и ручная авторизация
+
+Если источнику нужна авторизованная браузерная сессия:
+
+1. временно установите:
+
+```dotenv
+HEADLESS=false
+```
+
+2. запустите нужный скан;
+3. войдите на сайте вручную;
+4. закройте браузер после сохранения сессии.
+
+Cookies/session state сохраняются в:
+
+```text
+.browser-profile/
+```
+
+Не переносите эту директорию в Git или публичные архивы.
+
+---
+
+# 14. Архитектура проекта
+
+```text
+qa_job_scout/
+│
+├── __main__.py       # точка входа: python -m qa_job_scout
+├── cli.py             # CLI-команды
+├── crawler.py         # параллельный запуск адаптеров
+├── adapters.py        # адаптеры сайтов и HH API
+├── hh_api.py          # официальный HH API client, OAuth/PKCE, tokens
+├── core.py            # Vacancy, фильтры, scoring, даты, письма
+├── ai.py              # дополнительное AI-enrichment
+├── storage.py         # SQLite persistence
+└── __init__.py
+
+candidate_profile.json # профиль кандидата
+.env.example           # безопасный шаблон настроек
+pyproject.toml         # package/test/ruff configuration
+requirements.txt       # runtime dependencies
+requirements-dev.txt   # development/test dependencies
+tests/                 # automated tests
+```
+
+---
+
+# 15. SQLite
+
+После запуска появляется:
+
+```text
+qa_jobs.sqlite3
+```
+
+Основные таблицы:
+
+### `vacancies`
+
+Содержит сохранённые вакансии, статус, score и полный сериализованный объект вакансии.
+
+### `manual_decisions`
+
+Содержит ручные решения пользователя по вакансиям.
+
+### `source_runs`
+
+Журнал каждого запуска источника:
+
+- сколько карточек найдено;
+- сколько деталей открыто;
+- сколько вакансий собрано;
+- сколько рекомендовано;
+- сколько отправлено в `needs_review`;
+- сколько отклонено;
+- статус источника;
+- ошибки.
+
+SQLite-файл является локальным рабочим состоянием и исключён из Git.
+
+---
+
+# 16. Отчёт
+
+Основной результат:
+
+```text
+out/report.md
+```
+
+В отчёте отражаются результаты фильтрации и сведения о вакансиях, включая URL и дату, если она была получена.
+
+Для проблемных вакансий CLI также показывает причины `rejected` / `needs_review`.
+
+---
+
+# 17. Тесты
+
+Установить development dependencies:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
+Запустить тесты:
+
+```powershell
+python -m pytest -q
+```
+
+Запустить с coverage:
+
+```powershell
+pytest --cov=qa_job_scout --cov-report=term-missing
+```
+
+HTML-результаты pytest при необходимости:
+
+```powershell
+pytest --html=test-report.html --self-contained-html
+```
+
+---
+
+# 18. Ruff
+
+Проверка стиля и ошибок:
+
+```powershell
+ruff check .
+```
+
+Автоматические исправления Ruff:
+
+```powershell
+ruff check . --fix
+```
+
+Конфигурация Ruff находится в `pyproject.toml`:
+
+```toml
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+```
+
+---
+
+# 19. CI
+
+GitHub Actions workflow находится в:
+
+```text
+.github/workflows/ci.yml
+```
+
+CI предназначен для автоматической проверки проекта после push/PR.
+
+Секреты (`.env`, HH tokens, application tokens, API keys) в репозиторий не добавляются.
+
+---
+
+# 20. Git и безопасность
+
+В Git должны попадать только исходники и безопасные конфигурационные шаблоны.
+
+Не коммитить:
+
+```text
+.env
+.hh_tokens.json
+.hh_app_token.json
+qa_jobs.sqlite3
+.browser-profile/
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+```
+
+Особенно чувствительны:
+
+- `HH_CLIENT_SECRET`;
+- `HH_APPLICATION_TOKEN`;
+- `access_token`;
+- `refresh_token`;
+- `OPENAI_API_KEY`;
+- cookies из `.browser-profile`.
+
+Если секрет был опубликован в чате, issue, GitHub или другом месте, его следует заменить/ротировать в соответствующем сервисе.
+
+---
+
+# 21. Типовой рабочий процесс
+
+После первоначальной установки:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m qa_job_scout scan
+```
+
+Если нужен только HH.ru:
+
+```powershell
+python -m qa_job_scout scan --sources hh
+```
+
+Если нужно проверить только несколько площадок:
+
+```powershell
+python -m qa_job_scout scan --sources hh hirehi getmatch
+```
+
+После сканирования:
+
+```powershell
+python -m qa_job_scout report
+```
+
+Затем конкретную вакансию можно открыть:
+
+```powershell
+python -m qa_job_scout review <vacancy-id>
+```
+
+---
+
+# 22. Быстрая проверка установки
+
+Если проект развёрнут впервые, выполните:
+
+```powershell
+python --version
+python -m pytest -q
+python -m qa_job_scout --help
+python -m qa_job_scout scan --help
+```
+
+После этого можно запускать полный скан:
+
+```powershell
+python -m qa_job_scout scan
+```
+
+Для проверки именно HH:
+
+```powershell
+python -m qa_job_scout scan --sources hh
+```
+
+---
+
+## Лицензия / назначение
+
+Проект предназначен для личного использования как локальный помощник при поиске работы. При работе с внешними площадками необходимо соблюдать их правила использования, ограничения API и требования к авторизации.

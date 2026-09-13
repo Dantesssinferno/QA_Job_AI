@@ -1198,8 +1198,9 @@ class HHApiAdapter(BaseAdapter):
         context: BrowserContext | None = None,
         detail_semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[list[Vacancy], SourceRun]:
-        from .hh_api import HHApiCaptchaError, HHApiClient, HHApiError
         import httpx
+
+        from .hh_api import HHApiCaptchaError, HHApiClient, HHApiError
 
         run = SourceRun(self.spec.key, self.spec.name)
         if not self.search_texts:

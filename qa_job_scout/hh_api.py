@@ -87,15 +87,8 @@ class HHApiClient:
             raise HHApiError(
                 "HH_VACANCY_AUTH_MODE должен быть одним из: user, application, auto, anonymous."
             )
-        # HH application token is long-lived and must not be regenerated on every run.
-        # Prefer an explicitly configured token, then a local cache file, and only
-        # as a last resort request a new one (HH allows that no more than once/5 min).
-        self.application_access_token = os.getenv("HH_APPLICATION_TOKEN", "").strip()
-        self.application_token_file = Path(
-            os.getenv("HH_APPLICATION_TOKEN_FILE", ".hh_app_token.json").strip()
-            or ".hh_app_token.json"
-        )
         self._application_access_token = ""
+        self._application_token_expires_at = 0.0
         self.token_file = Path(
             os.getenv("HH_TOKEN_FILE", ".hh_tokens.json").strip() or ".hh_tokens.json"
         )
@@ -245,40 +238,10 @@ class HHApiClient:
         self.save_tokens(payload)
         return payload
 
-    def _load_application_token(self) -> str:
-        if self.application_access_token:
-            return self.application_access_token
-        try:
-            payload = json.loads(
-                self.application_token_file.read_text(encoding="utf-8")
-            )
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return ""
-        token = str(payload.get("access_token") or "").strip()
-        if token:
-            self.application_access_token = token
-        return token
-
-    def _save_application_token(self, token: str) -> None:
-        data = {"access_token": token}
-        self.application_token_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.application_token_file.with_suffix(
-            self.application_token_file.suffix + ".tmp"
-        )
-        temporary.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(self.application_token_file)
-        self.application_access_token = token
-
     async def _request_application_token(self, client: httpx.AsyncClient) -> str:
-        cached = self._load_application_token()
-        if cached:
-            return cached
         if not self.client_id or not self.client_secret:
             raise HHApiError(
-                "HH API: задайте HH_APPLICATION_TOKEN или HH_CLIENT_ID + HH_CLIENT_SECRET."
+                "HH API: задайте user OAuth token или HH_CLIENT_ID + HH_CLIENT_SECRET."
             )
         response = await client.post(
             self.TOKEN_URL,
@@ -290,25 +253,24 @@ class HHApiClient:
             headers={"HH-User-Agent": self.user_agent},
         )
         if response.status_code >= 400:
-            body = response.text[:1000]
-            if response.status_code == 403 and "app token refresh too early" in body:
-                raise HHApiError(
-                    "HH application token нельзя запрашивать чаще одного раза в 5 минут. "
-                    "Укажите уже выданный application access token в HH_APPLICATION_TOKEN "
-                    "или подождите 5 минут перед первой генерацией. "
-                    f"Ответ HH: {body}"
-                )
             raise HHApiError(
-                f"HH application token error {response.status_code}: {body}"
+                f"HH application token error {response.status_code}: {response.text[:700]}"
             )
         payload = response.json()
         token = str(payload.get("access_token") or "").strip()
         if not token:
             raise HHApiError("HH application token response не содержит access_token.")
-        self._save_application_token(token)
+        expires_in = int(payload.get("expires_in") or 0)
+        self._application_access_token = token
+        self._application_token_expires_at = time.time() + max(0, expires_in)
         return token
 
     async def _get_application_token(self, client: httpx.AsyncClient) -> str:
+        if self._application_access_token and (
+            self._application_token_expires_at <= 0
+            or time.time() < self._application_token_expires_at - 30
+        ):
+            return self._application_access_token
         return await self._request_application_token(client)
 
     async def _ensure_token(self, client: httpx.AsyncClient) -> str:
@@ -499,21 +461,14 @@ class HHApiClient:
         mode = self.vacancy_auth_mode
         if mode == "anonymous":
             return ""
-        if mode == "application":
-            return await self._get_application_token(client)
-        if mode == "user" and self.access_token:
+        if mode in {"user", "auto"} and self.access_token:
             return await self._ensure_token(client)
         if mode == "user":
             raise HHApiAuthError(
                 "HH OAuth token не найден для поиска вакансий. "
                 "Сначала выполните `python -m qa_job_scout hh-auth`."
             )
-        if mode == "auto":
-            # For public vacancy search, a long-lived application token is more
-            # appropriate than tying the collector to a user's personal OAuth
-            # session. Fall back to user OAuth only when no app token is configured.
-            if self.application_access_token or self.application_token_file.exists():
-                return await self._get_application_token(client)
+        if mode in {"application", "auto"}:
             return await self._get_application_token(client)
         raise HHApiError(f"Неподдерживаемый HH_VACANCY_AUTH_MODE: {mode}")
 
@@ -564,7 +519,7 @@ def parse_hh_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
     if parsed.tzinfo is None:

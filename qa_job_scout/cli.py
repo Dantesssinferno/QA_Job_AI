@@ -6,22 +6,22 @@ import os
 import secrets
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import ClassVar
+from urllib.parse import parse_qs, urlparse
 
 from .core import evaluate, load_profile
 from .storage import Store
 
 
-
 class _OAuthCallbackHandler(BaseHTTPRequestHandler):
-    result: dict[str, str] = {}
+    result: ClassVar[dict[str, str]] = {}
     expected_path = "/oauth/callback"
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path != self.expected_path:
             self.send_response(404)
@@ -41,13 +41,14 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
-    def log_message(self, format, *args):  # noqa: A002
+    def log_message(self, format, *args):
         return
 
 
 def hh_auth() -> None:
-    from .hh_api import HHApiClient, HHApiError, create_pkce_pair
     import httpx
+
+    from .hh_api import HHApiClient, HHApiError, create_pkce_pair
 
     api = HHApiClient()
     if not api.client_id or not api.client_secret:
@@ -362,9 +363,14 @@ def main() -> None:
         help="авторизовать приложение в HH.ru через OAuth2 + PKCE",
     )
 
-    sub.add_parser(
+    scan = sub.add_parser(
         "scan",
         help="собрать, отфильтровать и подготовить черновики",
+    )
+    scan.add_argument(
+        "--sources",
+        nargs="+",
+        help="ключи источников; без параметра сканируются все включённые источники",
     )
 
     sub.add_parser(
@@ -410,7 +416,8 @@ def main() -> None:
 
         profile = load_profile()
 
-        crawl_result = crawl_sync()
+        source_keys = set(args.sources) if args.sources else None
+        crawl_result = crawl_sync(source_keys)
 
         statuses_by_source: dict[str, Counter] = defaultdict(
             Counter

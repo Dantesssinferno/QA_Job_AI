@@ -920,7 +920,7 @@ def evaluate(
     if vacancy.published_at:
         try:
             date = datetime.fromisoformat(
-                vacancy.published_at.replace("Z", "+00:00")
+                vacancy.published_at
             )
             if date.tzinfo is None:
                 date = date.replace(tzinfo=UTC)
