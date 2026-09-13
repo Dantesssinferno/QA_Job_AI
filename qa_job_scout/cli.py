@@ -161,6 +161,7 @@ def write_report(store: Store) -> Path:
                 f"## {v.title} ({v.score}/95)",
                 f"- Источник: {v.source}",
                 f"- Ссылка: {v.url}",
+                f"- Дата публикации: {v.published_at or 'не определена'}",
                 f"- ID для review: `{v.id}`",
                 f"- Почему: {' '.join(v.reasons or [])}",
                 "",

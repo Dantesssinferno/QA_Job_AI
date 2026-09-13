@@ -1131,7 +1131,7 @@ class HHApiAdapter(BaseAdapter):
         )
         self.period_days = max(1, min(int(os.getenv("HH_PERIOD_DAYS", "5")), 30))
         self.per_page = max(1, min(int(os.getenv("HH_PER_PAGE", "50")), 100))
-        self.hh_max_vacancies = max(1, int(os.getenv("HH_MAX_VACANCIES", "50")))
+        self.hh_max_vacancies = max(1, int(os.getenv("HH_MAX_VACANCIES", "1000")))
         self.detail_concurrency = max(1, int(os.getenv("HH_DETAIL_CONCURRENCY", "6")))
 
     @staticmethod
@@ -1215,39 +1215,73 @@ class HHApiAdapter(BaseAdapter):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 captcha_retry_used = False
+                # HH /vacancies ограничивает одну страницу максимум 100
+                # элементами. Глубина пагинации ограничена 2000 результатами,
+                # поэтому для HH_MAX_VACANCIES=1000 нам нужно до 10 страниц
+                # на каждый поисковый запрос.
+                max_pages_per_query = max(
+                    1,
+                    min(2000, (self.hh_max_vacancies + self.per_page - 1) // self.per_page),
+                )
+
                 for query in self.search_texts:
-                    try:
-                        payload = await api.search_vacancies(
-                            client,
-                            text=query,
-                            period_days=self.period_days,
-                            page=0,
-                            per_page=self.per_page,
-                            work_format="REMOTE",
-                        )
-                    except HHApiCaptchaError as exc:
-                        if not captcha_retry_used and await api.solve_captcha_interactively(exc):
-                            captcha_retry_used = True
+                    for page_number in range(max_pages_per_query):
+                        try:
                             payload = await api.search_vacancies(
                                 client,
                                 text=query,
                                 period_days=self.period_days,
-                                page=0,
+                                page=page_number,
                                 per_page=self.per_page,
                                 work_format="REMOTE",
                             )
-                        else:
-                            raise
-                    for item in payload.get("items", []) or []:
-                        if not isinstance(item, dict):
-                            continue
-                        vacancy_id = str(item.get("id") or "").strip()
-                        if not vacancy_id or vacancy_id in seen:
-                            continue
-                        seen.add(vacancy_id)
-                        items.append(item)
+                        except HHApiCaptchaError as exc:
+                            if not captcha_retry_used and await api.solve_captcha_interactively(exc):
+                                captcha_retry_used = True
+                                payload = await api.search_vacancies(
+                                    client,
+                                    text=query,
+                                    period_days=self.period_days,
+                                    page=page_number,
+                                    per_page=self.per_page,
+                                    work_format="REMOTE",
+                                )
+                            else:
+                                raise
+
+                        page_items = payload.get("items", []) or []
+                        if not isinstance(page_items, list):
+                            page_items = []
+
+                        added_this_page = 0
+                        for item in page_items:
+                            if not isinstance(item, dict):
+                                continue
+                            vacancy_id = str(item.get("id") or "").strip()
+                            if not vacancy_id or vacancy_id in seen:
+                                continue
+                            seen.add(vacancy_id)
+                            items.append(item)
+                            added_this_page += 1
+                            if len(items) >= self.hh_max_vacancies:
+                                break
+
                         if len(items) >= self.hh_max_vacancies:
                             break
+
+                        # Последняя страница: HH вернул меньше, чем per_page.
+                        # Дальше по этому запросу результатов уже нет.
+                        if len(page_items) < self.per_page:
+                            break
+
+                        # Если страница целиком состоит из уже встречавшихся
+                        # вакансий, дальнейшие страницы с большой вероятностью
+                        # не дадут новых результатов; продолжаем только при
+                        # наличии новых элементов, чтобы не зациклиться на
+                        # нестабильной выдаче.
+                        if added_this_page == 0:
+                            break
+
                     if len(items) >= self.hh_max_vacancies:
                         break
 

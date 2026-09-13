@@ -25,6 +25,10 @@ class HHApiAuthError(HHApiError):
     """Raised when the HH OAuth authorization is missing or invalid."""
 
 
+class HHApiAccessError(HHApiError):
+    """Raised when HH rejects an API request for a non-OAuth, non-CAPTCHA reason."""
+
+
 class HHApiCaptchaError(HHApiError):
     """Raised when HH requires a CAPTCHA before continuing an API operation."""
 
@@ -75,6 +79,23 @@ class HHApiClient:
             "HH_REDIRECT_URI", "http://localhost:8000/oauth/callback"
         ).strip()
         self.auth_mode = os.getenv("HH_AUTH_MODE", "user").strip().lower() or "user"
+        self.vacancy_auth_mode = (
+            os.getenv("HH_VACANCY_AUTH_MODE", self.auth_mode).strip().lower()
+            or self.auth_mode
+        )
+        if self.vacancy_auth_mode not in {"user", "application", "auto", "anonymous"}:
+            raise HHApiError(
+                "HH_VACANCY_AUTH_MODE должен быть одним из: user, application, auto, anonymous."
+            )
+        # HH application token is long-lived and must not be regenerated on every run.
+        # Prefer an explicitly configured token, then a local cache file, and only
+        # as a last resort request a new one (HH allows that no more than once/5 min).
+        self.application_access_token = os.getenv("HH_APPLICATION_TOKEN", "").strip()
+        self.application_token_file = Path(
+            os.getenv("HH_APPLICATION_TOKEN_FILE", ".hh_app_token.json").strip()
+            or ".hh_app_token.json"
+        )
+        self._application_access_token = ""
         self.token_file = Path(
             os.getenv("HH_TOKEN_FILE", ".hh_tokens.json").strip() or ".hh_tokens.json"
         )
@@ -224,10 +245,40 @@ class HHApiClient:
         self.save_tokens(payload)
         return payload
 
+    def _load_application_token(self) -> str:
+        if self.application_access_token:
+            return self.application_access_token
+        try:
+            payload = json.loads(
+                self.application_token_file.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return ""
+        token = str(payload.get("access_token") or "").strip()
+        if token:
+            self.application_access_token = token
+        return token
+
+    def _save_application_token(self, token: str) -> None:
+        data = {"access_token": token}
+        self.application_token_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.application_token_file.with_suffix(
+            self.application_token_file.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(self.application_token_file)
+        self.application_access_token = token
+
     async def _request_application_token(self, client: httpx.AsyncClient) -> str:
+        cached = self._load_application_token()
+        if cached:
+            return cached
         if not self.client_id or not self.client_secret:
             raise HHApiError(
-                "HH API: задайте user OAuth token или HH_CLIENT_ID + HH_CLIENT_SECRET."
+                "HH API: задайте HH_APPLICATION_TOKEN или HH_CLIENT_ID + HH_CLIENT_SECRET."
             )
         response = await client.post(
             self.TOKEN_URL,
@@ -239,14 +290,26 @@ class HHApiClient:
             headers={"HH-User-Agent": self.user_agent},
         )
         if response.status_code >= 400:
+            body = response.text[:1000]
+            if response.status_code == 403 and "app token refresh too early" in body:
+                raise HHApiError(
+                    "HH application token нельзя запрашивать чаще одного раза в 5 минут. "
+                    "Укажите уже выданный application access token в HH_APPLICATION_TOKEN "
+                    "или подождите 5 минут перед первой генерацией. "
+                    f"Ответ HH: {body}"
+                )
             raise HHApiError(
-                f"HH application token error {response.status_code}: {response.text[:700]}"
+                f"HH application token error {response.status_code}: {body}"
             )
         payload = response.json()
         token = str(payload.get("access_token") or "").strip()
         if not token:
             raise HHApiError("HH application token response не содержит access_token.")
+        self._save_application_token(token)
         return token
+
+    async def _get_application_token(self, client: httpx.AsyncClient) -> str:
+        return await self._request_application_token(client)
 
     async def _ensure_token(self, client: httpx.AsyncClient) -> str:
         if self.access_token:
@@ -267,15 +330,16 @@ class HHApiClient:
 
     async def solve_captcha_interactively(self, error: HHApiCaptchaError) -> bool:
         """Open HH's official CAPTCHA page and wait for the user to complete it."""
-        captcha_url = error.captcha_url or error.fallback_url
-        if not captcha_url:
+        captcha_url = error.captcha_url
+        fallback_url = error.fallback_url
+        if not captcha_url and not fallback_url:
             return False
 
         interactive = os.getenv("HH_CAPTCHA_INTERACTIVE", "true").strip().lower() in {"1", "true", "yes", "on"}
         if not interactive:
             return False
         backurl = os.getenv("HH_CAPTCHA_BACKURL", "https://hh.ru/").strip() or "https://hh.ru/"
-        url = self.build_captcha_url(captcha_url, backurl=backurl) if error.captcha_url else captcha_url
+        url = self.build_captcha_url(captcha_url, backurl=backurl) if captcha_url else fallback_url
         print()
         print("[HH.ru] Требуется CAPTCHA / ручная проверка HH.")
         print("[HH.ru] Открываю страницу HH в браузере.")
@@ -391,30 +455,16 @@ class HHApiClient:
                             request_id=request_id,
                         )
 
-                    # Vacancy search/detail are public methods. HH documents 403 for these
-                    # endpoints as CAPTCHA, but some deployments return only {type: forbidden}
-                    # instead of the richer captcha_required payload. Do not misclassify this
-                    # as OAuth failure.
-                    if path == "/vacancies" or path.startswith("/vacancies/"):
-                        suffix = f" Request ID: {request_id}." if request_id else ""
-                        fallback_url = None
-                        if path == "/vacancies":
-                            query = {str(k): str(v) for k, v in params if str(k) not in {"host", "locale", "page"}}
-                            fallback_url = "https://hh.ru/search/vacancy?" + urlencode(query)
-                        raise HHApiCaptchaError(
-                            "HH CAPTCHA/ACCESS ERROR (403): HH.ru отклонил публичный запрос к вакансиям. "
-                            "Для GET /vacancies и GET /vacancies/{id} документация HH указывает CAPTCHA как причину 403. "
-                            "HH не вернул captcha_url, поэтому клиент использует страницу HH как fallback."
-                            + suffix,
-                            fallback_url=fallback_url,
-                            request_id=request_id,
-                        )
-
-                    body = response.text[:700].strip()
+                    # Do not invent a CAPTCHA URL. HH's documented CAPTCHA
+                    # contract explicitly uses type/value == captcha_required and
+                    # supplies captcha_url and/or fallback_url. A bare
+                    # {"type": "forbidden"} is neither an OAuth error nor sufficient
+                    # evidence to claim that a CAPTCHA is available.
+                    body = response.text[:1500].strip()
                     suffix = f" Request ID: {request_id}." if request_id else ""
-                    raise HHApiError(
-                        f"HH API ACCESS ERROR (403) для {path}: доступ запрещён. "
-                        f"Это не похоже на отсутствие OAuth-токена.{suffix} Ответ: {body}"
+                    raise HHApiAccessError(
+                        f"HH API ACCESS ERROR (403) для {path}: HH.ru отклонил запрос."
+                        f"{suffix} Ответ: {body}"
                     )
 
                 if response.status_code >= 400:
@@ -437,6 +487,36 @@ class HHApiClient:
 
         raise HHApiError(f"HH API request failed: {path}: {last_error!r}")
 
+    async def _vacancy_token(self, client: httpx.AsyncClient) -> str:
+        """Select the authorization mode for vacancy search/detail endpoints.
+
+        HH's current API documentation states that the vacancy list depends on the
+        authorization type and that an unauthenticated request may trigger CAPTCHA.
+        Prefer the saved user OAuth token; in auto mode fall back to an application
+        token if no user token exists. Anonymous mode is kept only as an explicit
+        diagnostic/fallback option.
+        """
+        mode = self.vacancy_auth_mode
+        if mode == "anonymous":
+            return ""
+        if mode == "application":
+            return await self._get_application_token(client)
+        if mode == "user" and self.access_token:
+            return await self._ensure_token(client)
+        if mode == "user":
+            raise HHApiAuthError(
+                "HH OAuth token не найден для поиска вакансий. "
+                "Сначала выполните `python -m qa_job_scout hh-auth`."
+            )
+        if mode == "auto":
+            # For public vacancy search, a long-lived application token is more
+            # appropriate than tying the collector to a user's personal OAuth
+            # session. Fall back to user OAuth only when no app token is configured.
+            if self.application_access_token or self.application_token_file.exists():
+                return await self._get_application_token(client)
+            return await self._get_application_token(client)
+        raise HHApiError(f"Неподдерживаемый HH_VACANCY_AUTH_MODE: {mode}")
+
     async def search_vacancies(
         self,
         client: httpx.AsyncClient,
@@ -448,10 +528,7 @@ class HHApiClient:
         work_format: str | None = "REMOTE",
         order_by: str = "publication_time",
     ) -> dict[str, Any]:
-        # GET /vacancies is a public API method. HH documentation does not require
-        # OAuth for vacancy search; using an applicant OAuth token here can produce
-        # a generic 403 even though /me accepts the token.
-        token = ""
+        token = await self._vacancy_token(client)
         params: list[tuple[str, str | int]] = [
             ("text", text),
             ("search_field", "name"),
@@ -473,8 +550,7 @@ class HHApiClient:
         client: httpx.AsyncClient,
         vacancy_id: str,
     ) -> dict[str, Any]:
-        # GET /vacancies/{id} is also a public API method; OAuth is not required.
-        token = ""
+        token = await self._vacancy_token(client)
         return await self._request_json(
             client,
             "GET",

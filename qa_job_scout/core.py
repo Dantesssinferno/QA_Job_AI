@@ -913,14 +913,29 @@ def evaluate(
     # Не пытаемся угадывать дату по всему description:
     # в описании могут встречаться даты, сроки, числа опыта,
     # даты обновлений и данные из блоков рекомендаций.
-    date_source = " ".join(
-        vacancy.published_text.split()
-    )
+    # API adapters (например HH.ru) могут уже передать точную
+    # ISO 8601 дату в ``published_at``. Не затираем её попыткой
+    # распарсить ISO-строку как человекочитаемый текст.
+    date = None
+    if vacancy.published_at:
+        try:
+            date = datetime.fromisoformat(
+                vacancy.published_at.replace("Z", "+00:00")
+            )
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=UTC)
+            date = date.astimezone(UTC)
+        except ValueError:
+            date = None
 
-    date = parse_age(
-        date_source,
-        now,
-    ) if date_source else None
+    if date is None:
+        date_source = " ".join(
+            vacancy.published_text.split()
+        )
+        date = parse_age(
+            date_source,
+            now,
+        ) if date_source else None
 
     vacancy.published_at = (
         date.isoformat()

@@ -57,3 +57,18 @@ def test_date_parser_supports_weeks_and_years():
 
     assert parse_age("1 неделя", NOW) == NOW - __import__("datetime").timedelta(days=7)
     assert parse_age("2 года", NOW) == NOW - __import__("datetime").timedelta(days=730)
+
+
+def test_evaluate_preserves_api_iso_publication_date():
+    vacancy = Vacancy(
+        "HH.ru API",
+        "Manual QA Engineer",
+        "https://hh.ru/vacancy/1",
+        "remote REST API Postman",
+        published_text="2026-09-12T09:36:19+00:00",
+        published_at="2026-09-12T09:36:19+00:00",
+        remote=True,
+    )
+    result = evaluate(vacancy, PROFILE, NOW)
+    assert result.published_at == "2026-09-12T09:36:19+00:00"
+    assert result.status == "recommended"
