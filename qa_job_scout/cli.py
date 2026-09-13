@@ -370,7 +370,7 @@ def main() -> None:
     scan.add_argument(
         "--sources",
         nargs="+",
-        help="ключи источников; без параметра сканируются все включённые источники",
+        help="ключи источников через пробел или запятую; без параметра сканируются все включённые источники",
     )
 
     sub.add_parser(
@@ -416,7 +416,14 @@ def main() -> None:
 
         profile = load_profile()
 
-        source_keys = set(args.sources) if args.sources else None
+        source_keys = None
+        if args.sources:
+            source_keys = {
+                key.strip().lower()
+                for value in args.sources
+                for key in value.split(",")
+                if key.strip()
+            }
         crawl_result = crawl_sync(source_keys)
 
         statuses_by_source: dict[str, Counter] = defaultdict(

@@ -39,6 +39,8 @@ class AdapterSpec:
     vacancy_url_pattern: str | None = None
     excluded_url_patterns: tuple[str, ...] = ()
     detail_wait_selector: str = "h1"
+    list_wait_selector: str = ""
+    list_wait_timeout_ms: int = 10000
     requires_login: bool = False
     detail_pages: bool = True
 
@@ -381,6 +383,19 @@ class BaseAdapter:
         cards = page.locator(
             self.spec.card_selector
         )
+
+        # Many sources render vacancy cards asynchronously after the initial
+        # DOMContentLoaded event. Give the page a source-specific opportunity
+        # to finish rendering before concluding that the source is empty.
+        wait_selector = self.spec.list_wait_selector or self.spec.card_selector
+        if wait_selector:
+            try:
+                await page.locator(wait_selector).first.wait_for(
+                    state="attached",
+                    timeout=self.spec.list_wait_timeout_ms,
+                )
+            except PlaywrightTimeoutError:
+                pass
 
         if await cards.count():
             raw_cards = await self._extract_cards_from_locator(
@@ -763,9 +778,8 @@ class DreamJobAdapter(BaseAdapter):
                 "a[href*='/vacancy']"
             ),
             title_selectors=(
-                "h2",
-                "h3",
-                "[class*='title']",
+                ".b-vacancy-card-title h3",
+                ".b-vacancy-card-title h3 a",
             ),
             detail_body_selectors=(
                 "main",
@@ -774,6 +788,8 @@ class DreamJobAdapter(BaseAdapter):
                 "body",
             ),
             detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            list_wait_selector="div.b-vacancy-card",
+            list_wait_timeout_ms=12000,
             detail_cut_markers=GENERIC_CUT_MARKERS,
             excluded_url_patterns=(
                 "/vakansii/vacancy-",
@@ -967,7 +983,7 @@ class GetMatchAdapter(BaseAdapter):
                 "div.b-vacancy-card"
             ),
             link_selector=(
-                "div.b-vacancy-card a[href*='/vacancies/']"
+                "div.b-vacancy-card-title h3 a[href*='/vacancies/']"
             ),
             excluded_url_patterns=(
                 "?s=vacancies_seo_links_",
@@ -982,9 +998,8 @@ class GetMatchAdapter(BaseAdapter):
                 "/vacancies/remote",
             ),
             title_selectors=(
-                "h2",
-                "h3",
-                "[class*='title']",
+                ".b-vacancy-card-title h3",
+                ".b-vacancy-card-title h3 a",
             ),
             detail_body_selectors=(
                 "main",
@@ -993,6 +1008,8 @@ class GetMatchAdapter(BaseAdapter):
                 "body",
             ),
             detail_exclude_selectors=GENERIC_EXCLUDE_SELECTORS,
+            list_wait_selector="div.b-vacancy-card",
+            list_wait_timeout_ms=12000,
             detail_cut_markers=(
                 *GENERIC_CUT_MARKERS,
                 "Больше вакансий",
@@ -1015,7 +1032,7 @@ class GeekJobAdapter(BaseAdapter):
         return AdapterSpec(
             key="geekjob",
             name="GeekJob",
-            url="https://geekjob.ru/vacancies?rm=1&qs=QA",
+            url="https://geekjob.ru/vacancies?qs=QA",
             card_selector=(
                 "li.collection-item.avatar"
             ),
@@ -1044,6 +1061,8 @@ class GeekJobAdapter(BaseAdapter):
                 r"^https?://(?:www\.)?geekjob\.ru/vacancy/"
                 r"[0-9a-f]{24}(?:[?#].*)?$"
             ),
+            list_wait_selector="li.collection-item.avatar",
+            list_wait_timeout_ms=12000,
             # На GeekJob на странице вакансии есть блок "Еще интересные вакансии"
             # с собственными датами. Нельзя искать дату по всей странице:
             # Playwright может взять дату из article[4] вместо основной вакансии
@@ -1074,7 +1093,9 @@ class RVCAdapter(BaseAdapter):
                 "article, [class*='job-card'], [class*='vacancy-card']"
             ),
             link_selector=(
-                "a[href*='?job='], a[href*='&job=']"
+                "a[href*='/vacancy/view/'], "
+                "a[href*='?job='], "
+                "a[href*='&job=']"
             ),
             excluded_url_patterns=(
                 "/jobs/python-remote",
@@ -1101,7 +1122,15 @@ class RVCAdapter(BaseAdapter):
             date_selectors=(
                 "time",
                 "[datetime]",
+                "[class*='date']",
+                "[class*='published']",
             ),
+            list_wait_selector=(
+                "a[href*='/vacancy/view/'], "
+                "a[href*='?job='], "
+                "article"
+            ),
+            list_wait_timeout_ms=12000,
         )
 
 
