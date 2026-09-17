@@ -89,6 +89,11 @@ class HHApiClient:
             )
         self._application_access_token = ""
         self._application_token_expires_at = 0.0
+        self.application_token_file = Path(
+            os.getenv("HH_APPLICATION_TOKEN_FILE", ".hh_app_token.json").strip()
+            or ".hh_app_token.json"
+        )
+        self._load_application_token()
         self.token_file = Path(
             os.getenv("HH_TOKEN_FILE", ".hh_tokens.json").strip() or ".hh_tokens.json"
         )
@@ -238,10 +243,54 @@ class HHApiClient:
         self.save_tokens(payload)
         return payload
 
+    def _load_application_token(self) -> None:
+        """Load a reusable HH application token from env or disk.
+
+        HH application tokens are not normal short-lived OAuth access tokens:
+        requesting a new one too soon can return HTTP 403 ``refresh too early``.
+        Therefore the token must be persisted and reused between process runs.
+        """
+        configured = os.getenv("HH_APPLICATION_TOKEN", "").strip()
+        if configured:
+            self._application_access_token = configured
+            self._application_token_expires_at = 0.0
+            return
+
+        try:
+            payload = json.loads(
+                self.application_token_file.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+
+        token = str(payload.get("access_token") or payload.get("token") or "").strip()
+        if token:
+            self._application_access_token = token
+            self._application_token_expires_at = 0.0
+
+    def _clear_application_token(self) -> None:
+        self._application_access_token = ""
+        self._application_token_expires_at = 0.0
+        try:
+            self.application_token_file.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _save_application_token(self, token: str) -> None:
+        self.application_token_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.application_token_file.with_suffix(
+            self.application_token_file.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps({"access_token": token}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(self.application_token_file)
+
     async def _request_application_token(self, client: httpx.AsyncClient) -> str:
         if not self.client_id or not self.client_secret:
             raise HHApiError(
-                "HH API: задайте user OAuth token или HH_CLIENT_ID + HH_CLIENT_SECRET."
+                "HH API: задайте HH_APPLICATION_TOKEN или HH_CLIENT_ID + HH_CLIENT_SECRET."
             )
         response = await client.post(
             self.TOKEN_URL,
@@ -260,16 +309,15 @@ class HHApiClient:
         token = str(payload.get("access_token") or "").strip()
         if not token:
             raise HHApiError("HH application token response не содержит access_token.")
-        expires_in = int(payload.get("expires_in") or 0)
         self._application_access_token = token
-        self._application_token_expires_at = time.time() + max(0, expires_in)
+        # Do not treat application tokens as short-lived tokens. Reuse the
+        # persisted token until HH explicitly requires a new one.
+        self._application_token_expires_at = 0.0
+        self._save_application_token(token)
         return token
 
     async def _get_application_token(self, client: httpx.AsyncClient) -> str:
-        if self._application_access_token and (
-            self._application_token_expires_at <= 0
-            or time.time() < self._application_token_expires_at - 30
-        ):
+        if self._application_access_token:
             return self._application_access_token
         return await self._request_application_token(client)
 
@@ -328,6 +376,7 @@ class HHApiClient:
         *,
         params: list[tuple[str, str | int]],
         token: str,
+        auth_kind: str = "user",
     ) -> dict[str, Any]:
         url = f"{self.BASE_URL.rstrip('/')}/{path.lstrip('/')}"
         current_token = token
@@ -345,13 +394,17 @@ class HHApiClient:
 
                 if response.status_code == 401 and not refreshed_after_401:
                     refreshed_after_401 = True
-                    if self.refresh_token:
+                    if auth_kind == "application":
+                        self._clear_application_token()
+                        current_token = await self._get_application_token(client)
+                        continue
+                    if auth_kind == "user" and self.refresh_token:
                         async with self._token_lock:
                             await self.refresh_user_token(client)
                             current_token = self.access_token
                         continue
-                    if self.auth_mode == "auto":
-                        current_token = await self._request_application_token(client)
+                    if auth_kind == "user" and self.auth_mode == "auto":
+                        current_token = await self._get_application_token(client)
                         continue
 
                 if response.status_code == 429:
@@ -391,6 +444,31 @@ class HHApiClient:
                             "application_not_found",
                             "user_auth_expected",
                         }:
+                            # An application token can be invalidated when a new
+                            # application token is issued. If a cached application
+                            # token is rejected, discard only that cache and obtain
+                            # one fresh token, then retry the original API request.
+                            # Do this once per request to avoid an auth loop.
+                            is_application_token = (
+                                bool(current_token)
+                                and current_token == self._application_access_token
+                                and self.vacancy_auth_mode in {"application", "auto"}
+                            )
+                            if (
+                                error_value == "bad_authorization"
+                                and is_application_token
+                                and not refreshed_after_401
+                            ):
+                                self._clear_application_token()
+                                try:
+                                    current_token = await self._get_application_token(
+                                        client
+                                    )
+                                except HHApiError:
+                                    raise
+                                refreshed_after_401 = True
+                                continue
+
                             if error_value in {"bad_authorization", "token_revoked"}:
                                 self.clear_tokens()
                             details = {
@@ -497,7 +575,12 @@ class HHApiClient:
         if work_format:
             params.append(("work_format", work_format))
         return await self._request_json(
-            client, "GET", "/vacancies", params=params, token=token
+            client,
+            "GET",
+            "/vacancies",
+            params=params,
+            token=token,
+            auth_kind=self.vacancy_auth_mode,
         )
 
     async def get_vacancy(
@@ -512,14 +595,62 @@ class HHApiClient:
             f"/vacancies/{vacancy_id}",
             params=[("host", self.host), ("locale", self.locale)],
             token=token,
+            auth_kind=self.vacancy_auth_mode,
         )
+
+
+    async def check_user_token(self, client: httpx.AsyncClient) -> dict[str, Any]:
+        """Non-destructive diagnostic for the saved user OAuth token."""
+        if not self.access_token:
+            return {"ok": False, "status_code": None, "error": "token_missing"}
+        url = f"{self.BASE_URL.rstrip('/')}/me"
+        try:
+            response = await client.get(url, headers=self._headers(self.access_token))
+            payload: Any
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = response.text[:700]
+            return {
+                "ok": response.status_code < 400,
+                "status_code": response.status_code,
+                "payload": payload,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status_code": None, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def check_vacancy_search(self, client: httpx.AsyncClient) -> dict[str, Any]:
+        """Non-destructive diagnostic for the vacancy endpoint."""
+        try:
+            token = await self._vacancy_token(client)
+            params: list[tuple[str, str | int]] = [
+                ("text", "QA Engineer"),
+                ("search_field", "name"),
+                ("period", 5),
+                ("page", 0),
+                ("per_page", 1),
+                ("order_by", "publication_time"),
+                ("host", self.host),
+                ("locale", self.locale),
+            ]
+            payload = await self._request_json(
+                client,
+                "GET",
+                "/vacancies",
+                params=params,
+                token=token,
+                auth_kind=self.vacancy_auth_mode,
+            )
+            return {"ok": True, "status_code": 200, "payload": payload}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status_code": getattr(exc, "status_code", None), "error": str(exc)}
 
 
 def parse_hh_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:

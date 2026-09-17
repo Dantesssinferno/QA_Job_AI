@@ -129,6 +129,54 @@ def hh_auth() -> None:
         print(f"Access token expires_in: {expires} seconds")
 
 
+def hh_check() -> None:
+    """Diagnose the saved HH OAuth token without exposing the token itself."""
+    import httpx
+
+    from .hh_api import HHApiClient
+
+    api = HHApiClient()
+    print("HH OAuth diagnostic")
+    print(f"  token file: {api.token_file}")
+    print(f"  user token loaded: {'yes' if api.access_token else 'no'}")
+    if api.expires_at:
+        remaining = int(api.expires_at - __import__('time').time())
+        print(f"  access token remaining: {remaining} sec")
+    print(f"  HH_AUTH_MODE: {api.auth_mode}")
+    print(f"  HH_VACANCY_AUTH_MODE: {api.vacancy_auth_mode}")
+
+    async def run() -> None:
+        timeout = httpx.Timeout(api.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            me = await api.check_user_token(client)
+            print(f"\nGET /me: HTTP {me.get('status_code')}")
+            if me.get("ok"):
+                payload = me.get("payload") or {}
+                print("  OAuth token accepted by HH: YES")
+                print(f"  auth_type: {payload.get('auth_type', 'unknown')}")
+                print(f"  is_applicant: {payload.get('is_applicant', 'unknown')}")
+                print(f"  is_application: {payload.get('is_application', 'unknown')}")
+            else:
+                print("  OAuth token accepted by HH: NO")
+                print(f"  HH response: {me.get('payload') or me.get('error')}")
+                return
+
+            vacancies = await api.check_vacancy_search(client)
+            print(f"\nGET /vacancies (1 result): HTTP {vacancies.get('status_code')}")
+            if vacancies.get("ok"):
+                payload = vacancies.get("payload") or {}
+                print("  Vacancy API: OK")
+                print(f"  found: {payload.get('found', 'unknown')}")
+            else:
+                print("  Vacancy API: FAILED")
+                print(f"  HH response: {vacancies.get('payload') or vacancies.get('error')}")
+
+    try:
+        asyncio.run(run())
+    except Exception as exc:
+        raise SystemExit(f"HH check failed: {exc}") from exc
+
+
 def write_report(store: Store) -> Path:
     """
     Создаёт Markdown-отчёт только из актуальных вакансий.
@@ -363,6 +411,11 @@ def main() -> None:
         help="авторизовать приложение в HH.ru через OAuth2 + PKCE",
     )
 
+    sub.add_parser(
+        "hh-check",
+        help="проверить сохранённый HH OAuth token через /me и /vacancies",
+    )
+
     scan = sub.add_parser(
         "scan",
         help="собрать, отфильтровать и подготовить черновики",
@@ -408,6 +461,10 @@ def main() -> None:
 
     if args.command == "hh-auth":
         hh_auth()
+        return
+
+    if args.command == "hh-check":
+        hh_check()
         return
 
     if args.command == "scan":
