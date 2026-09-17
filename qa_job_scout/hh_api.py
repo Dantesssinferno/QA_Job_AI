@@ -460,12 +460,7 @@ class HHApiClient:
                                 and not refreshed_after_401
                             ):
                                 self._clear_application_token()
-                                try:
-                                    current_token = await self._get_application_token(
-                                        client
-                                    )
-                                except HHApiError:
-                                    raise
+                                current_token = await self._get_application_token(client)
                                 refreshed_after_401 = True
                                 continue
 
@@ -650,7 +645,7 @@ def parse_hh_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
     if parsed.tzinfo is None:
